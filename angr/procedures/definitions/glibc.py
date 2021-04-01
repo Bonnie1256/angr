@@ -4196,7 +4196,7 @@ _libc_decls = {
         arg_names=["param", "buffer"],
     ),
     # div_t div (int NUMERATOR, int DENOMINATOR);
-    "div": None,
+    "div": SimTypeFunction([SimTypeInt(signed=True), SimTypeInt(signed=True)], SimTypeLongLong(signed=False), arg_names=["numerator", "denominator"]),
     # ldiv_t ldiv (long int NUMERATOR, long int DENOMINATOR);
     "ldiv": None,
     # lldiv_t lldiv (long long int NUMERATOR, long long int DENOMINATOR);
