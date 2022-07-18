@@ -1535,7 +1535,8 @@ class SimCCARM(SimCC):
     FP_ARG_REGS = []    # regular arg regs are used as fp arg regs
     CALLER_SAVED_REGS = []
     RETURN_ADDR = SimRegArg('lr', 4)
-    RETURN_VAL = SimRegArg('r0', 4) #TODO Return val can also include reg r1
+    RETURN_VAL = SimRegArg('r0', 4)
+    FP_RETURN_VAL = SimRegArg('r0', 4)
     ARCH = archinfo.ArchARM
 
     # https://github.com/ARM-software/abi-aa/blob/60a8eb8c55e999d74dac5e368fc9d7e36e38dda4/aapcs32/aapcs32.rst#parameter-passing
