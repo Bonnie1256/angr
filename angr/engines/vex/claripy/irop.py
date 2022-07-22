@@ -97,6 +97,7 @@ explicit_attrs = {
     'Iop_V256to64_3': { 'generic_name': 'unpack', 'to_size': 64, },
     'Iop_V256toV128_0': { 'generic_name': 'unpack', 'to_size': 128, },
     'Iop_V256toV128_1': { 'generic_name': 'unpack', 'to_size': 128, },
+    'Iop_SetV128lo32': {}
 }
 
 for _vec_lanewidth in (8, 16, 32, 64):
@@ -1194,6 +1195,9 @@ class SimIROp:
     #   return accumulator
 
 
+    @staticmethod
+    def _op_Iop_SetV128lo32(args): return args[0][127:32].concat(args[1])
+
 #
 # Op Handler
 #
@@ -1204,7 +1208,10 @@ def vexop_to_simop(op, extended=True, fp=True):
         attrs = op_attrs(op)
         if attrs is None:
             raise UnsupportedIROpError("Operation not implemented")
-        res = SimIROp(op, **attrs)
+        try:
+            res = SimIROp(op, **attrs)
+        except SimOperationError:
+            pass
     if res is None:
         raise UnsupportedIROpError("Operation not implemented")
     if res._float and not fp:
