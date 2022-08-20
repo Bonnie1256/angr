@@ -1,6 +1,7 @@
 from itertools import count
 from typing import Optional, List, Dict, Tuple, Set, Callable, Any, TYPE_CHECKING
 
+import ipdb
 import networkx
 
 import claripy
@@ -119,7 +120,7 @@ class StateGraphRecoveryAnalysis(Analysis):
     Traverses a function and derive a state graph with respect to given variables.
     """
     def __init__(self, func: 'Function', fields: 'AbstractStateFields', software: str,
-                 time_addr: int, temp_addr: int = None,
+                 time_addr: int, rollsensor_addr: int = None,
                  init_state: Optional['SimState']=None, switch_on: Optional[Callable]=None,
                  printstate: Optional[Callable]=None,
                  config_vars: Optional[Set[claripy.ast.Base]]=None,
@@ -135,9 +136,11 @@ class StateGraphRecoveryAnalysis(Analysis):
         self.patch_callback = patch_callback
 
         self._time_addr = time_addr
-        self._temp_addr = temp_addr
+        # self._temp_addr = temp_addr
+        self._rollsensor_addr = rollsensor_addr
         self._tv_sec_var = None
-        self._temperature = None
+        # self._temperature = None
+        self._rollsensor = None
         self.state_graph = None
         self._expression_source = {}
 
@@ -153,14 +156,16 @@ class StateGraphRecoveryAnalysis(Analysis):
 
         symbolic_input_fields = self._symbolize_input_fields(init_state)
         symbolic_time_counters = self._symbolize_timecounter(init_state)
-        if self._temp_addr is not None:
-            symbolic_temperature = self._symbolize_temp(init_state)
+        symbolic_rollsensor = self._symbolize_rollsensor(init_state)
+        # if self._temp_addr is not None:
+        #     symbolic_temperature = self._symbolize_temp(init_state)
 
         # setup inspection points to catch where expressions are created
         all_vars = set(symbolic_input_fields.values())
         all_vars |= set(symbolic_time_counters.values())
-        if self._temp_addr is not None:
-            all_vars |= set(symbolic_temperature.values())
+        all_vars |= set(symbolic_rollsensor.values())
+        # if self._temp_addr is not None:
+        #     all_vars |= set(symbolic_temperature.values())
         all_vars |= self.config_vars
         slice_gen = SliceGenerator(all_vars, bp=None)
         expression_bp = slice_gen.install_expr_hook(init_state)
@@ -188,33 +193,45 @@ class StateGraphRecoveryAnalysis(Analysis):
 
         known_transitions = list()
         known_states = dict()
+        time_delta_and_sources = {}
+        # temp_delta_and_sources = {}
+        rollsensor_delta_and_sources = {}
 
         absstate_to_slice = { }
         while state_queue:
-            prev_state, prev_abs_state_id, prev_abs_state, prev_prev_abs, time_delta, time_delta_constraint, time_delta_src, temp_delta, temp_delta_constraint, temp_delta_src = state_queue.pop(0)
+            prev_state, prev_abs_state_id, prev_abs_state, prev_prev_abs, time_delta, time_delta_constraint, time_delta_src, rollsensor_delta, rollsensor_delta_constraint, rollsensor_delta_src = state_queue.pop(0)
             if time_delta is None:
                 pass
             else:
                 # advance the time stamp as required
                 self._advance_timecounter(prev_state, time_delta)
 
-            if temp_delta is None:
+            if rollsensor_delta is None:
                 pass
             else:
-                # advance the temperature stamp as required
-                self._advance_temp(prev_state, temp_delta)
+                # advance the time stamp as required
+                self._advance_rollsensor(prev_state, rollsensor_delta)
+
+            # if temp_delta is None:
+            #     pass
+            # else:
+            #     # advance the temperature stamp as required
+            #     self._advance_temp(prev_state, temp_delta)
 
             # symbolically trace the state
             expression_bp.enabled = True
             next_state = self._traverse_one(prev_state)
+            # for
             expression_bp.enabled = False
 
             abs_state = self.fields.generate_abstract_state(next_state)
             abs_state += (('time_delta', time_delta),
                           # ('tdc', time_delta_constraint),
                           ('td_src', time_delta_src),
-                          ('temp_delta', temp_delta),
-                          ('temp_src', temp_delta_src)
+                          # ('temp_delta', temp_delta),
+                          # ('temp_src', temp_delta_src)
+                          ('rollsensor_delta', rollsensor_delta),
+                          ('rollsensor_src', rollsensor_delta_src)
                           )
             if switched_on:
                 if abs_state in known_states.keys():
@@ -243,9 +260,12 @@ class StateGraphRecoveryAnalysis(Analysis):
                                       time_delta=time_delta,
                                       time_delta_constraint=time_delta_constraint,
                                       time_delta_src=time_delta_src,
-                                      temp_delta=temp_delta,
-                                      temp_delta_constraint=temp_delta_constraint,
-                                      temp_delta_src=temp_delta_src,
+                                      # temp_delta=temp_delta,
+                                      # temp_delta_constraint=temp_delta_constraint,
+                                      # temp_delta_src=temp_delta_src,
+                                      rollsensor_delta=rollsensor_delta,
+                                      rollsensor_delta_constraint=rollsensor_delta_constraint,
+                                      rollsensor_delta_src=rollsensor_delta_src,
                                       )
 
             # discover time deltas
@@ -264,7 +284,8 @@ class StateGraphRecoveryAnalysis(Analysis):
                         self.patch_callback(next_state)
                     switched_on = True
                     time_delta_and_sources = {}
-                    temp_delta_and_sources = {}
+                    # temp_delta_and_sources = {}
+                    rollsensor_delta_and_sources = {}
                     prev_abs_state = None
                     # state_queue.append((new_state, abs_state_id, abs_state, None, None, None, None, None, None))
             else:
@@ -276,77 +297,152 @@ class StateGraphRecoveryAnalysis(Analysis):
                     else:
                         block_addr, stmt_idx = source
                     print(f"[.] Discovered a new time interval {delta} defined at {block_addr:#x}:{stmt_idx}")
-                if self._temp_addr is not None:
-                    temp_delta_and_sources = self._discover_temp_deltas(next_state)
-                    for delta, constraint, source in temp_delta_and_sources:
+                # if self._temp_addr is not None:
+                #     temp_delta_and_sources = self._discover_temp_deltas(next_state)
+                #     for delta, constraint, source in temp_delta_and_sources:
+                #         if source is None:
+                #             block_addr, stmt_idx = -1, -1
+                #         else:
+                #             block_addr, stmt_idx = source
+                #         print(f"[.] Discovered a new temperature {delta} defined at {block_addr:#x}:{stmt_idx}")
+                if self._rollsensor_addr is not None:
+                    rollsensor_delta_and_sources = self._discover_rollsensor_deltas(next_state)
+                    for delta, constraint, source in rollsensor_delta_and_sources:
                         if source is None:
                             block_addr, stmt_idx = -1, -1
                         else:
                             block_addr, stmt_idx = source
-                        print(f"[.] Discovered a new temperature {delta} defined at {block_addr:#x}:{stmt_idx}")
+                        print(f"[.] Discovered a new rollsensor {delta} defined at {block_addr:#x}:{stmt_idx}")
 
-            if temp_delta_and_sources or time_delta_and_sources:
+            # if temp_delta_and_sources or time_delta_and_sources:
+            #
+            #     if temp_delta_and_sources:
+            #
+            #         for temp_delta, temp_constraint, temp_src in temp_delta_and_sources:
+            #             # append two states in queue
+            #             op = temp_constraint.args[0].op
+            #             prev = next_state.memory.load(self._temp_addr, 8, endness=self.project.arch.memory_endness).raw_to_fp()
+            #             prev_temp = next_state.solver.eval(prev)
+            #             if op in ['fpLEQ', 'fpLT', 'fpGEQ', 'fpGT']:
+            #                 if prev_temp < temp_delta:
+            #                     delta0, temp_constraint0, temp_src0 = None, None, None
+            #                     delta1, temp_constraint1, temp_src1 = temp_delta + 1.0, temp_constraint, temp_src
+            #
+            #                     new_state = self._initialize_state(init_state=next_state)
+            #
+            #                     # re-symbolize input fields, time counters, and update slice generator
+            #                     symbolic_input_fields = self._symbolize_input_fields(new_state)
+            #                     symbolic_time_counters = self._symbolize_timecounter(new_state)
+            #                     symbolic_temperature = self._symbolize_temp(new_state)
+            #                     all_vars = set(symbolic_input_fields.values())
+            #                     all_vars |= set(symbolic_time_counters.values())
+            #                     all_vars |= set(symbolic_temperature.values())
+            #                     all_vars |= self.config_vars
+            #                     slice_gen = SliceGenerator(all_vars, bp=expression_bp)
+            #                     state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, None, None, None, delta1,
+            #                                         temp_constraint1, temp_src1))
+            #                 elif prev_temp > temp_delta:
+            #                     delta0, temp_constraint0, temp_src0 = temp_delta - 1.0, temp_constraint, temp_src
+            #                     delta1, temp_constraint1, temp_src1 = None, None, None
+            #
+            #                     new_state = self._initialize_state(init_state=next_state)
+            #
+            #                     # re-symbolize input fields, time counters, and update slice generator
+            #                     symbolic_input_fields = self._symbolize_input_fields(new_state)
+            #                     symbolic_time_counters = self._symbolize_timecounter(new_state)
+            #                     symbolic_temperature = self._symbolize_temp(new_state)
+            #                     all_vars = set(symbolic_input_fields.values())
+            #                     all_vars |= set(symbolic_time_counters.values())
+            #                     all_vars |= set(symbolic_temperature.values())
+            #                     all_vars |= self.config_vars
+            #                     slice_gen = SliceGenerator(all_vars, bp=expression_bp)
+            #                     state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, None, None, None, delta0,
+            #                                         temp_constraint0, temp_src0))
+            #                 else:
+            #                     import ipdb; ipdb.set_trace()
+            #
+            #             elif op in ['fpEQ']:
+            #                 # import ipdb; ipdb.set_trace()
+            #                 new_state = self._initialize_state(init_state=next_state)
+            #
+            #                 # re-symbolize input fields, time counters, and update slice generator
+            #                 symbolic_input_fields = self._symbolize_input_fields(new_state)
+            #                 symbolic_time_counters = self._symbolize_timecounter(new_state)
+            #                 symbolic_temperature = self._symbolize_temp(new_state)
+            #                 all_vars = set(symbolic_input_fields.values())
+            #                 all_vars |= set(symbolic_time_counters.values())
+            #                 all_vars |= set(symbolic_temperature.values())
+            #                 all_vars |= self.config_vars
+            #                 slice_gen = SliceGenerator(all_vars, bp=expression_bp)
+            #                 state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, None, None, None, temp_delta, temp_constraint, temp_src))
+            #                 continue
 
-                if temp_delta_and_sources:
+            if rollsensor_delta_and_sources or time_delta_and_sources:
 
-                    for temp_delta, temp_constraint, temp_src in temp_delta_and_sources:
+                if rollsensor_delta_and_sources:
+
+                    for rollsensor_delta, rollsensor_constraint, rollsensor_src in rollsensor_delta_and_sources:
                         # append two states in queue
-                        op = temp_constraint.args[0].op
-                        prev = next_state.memory.load(self._temp_addr, 8, endness=self.project.arch.memory_endness).raw_to_fp()
-                        prev_temp = next_state.solver.eval(prev)
-                        if op in ['fpLEQ', 'fpLT', 'fpGEQ', 'fpGT']:
-                            if prev_temp < temp_delta:
-                                delta0, temp_constraint0, temp_src0 = None, None, None
-                                delta1, temp_constraint1, temp_src1 = temp_delta + 1.0, temp_constraint, temp_src
+                        op = rollsensor_constraint.op
+                        prev = next_state.memory.load(self._rollsensor_addr, 4, endness=self.project.arch.memory_endness)
+                        prev_rollsensor = next_state.solver.eval(prev)
+                        import ipdb; ipdb.set_trace()
+                        if op in ['SLE', 'SGT']:
+                            if prev_rollsensor < rollsensor_delta:
+                                delta0, rollsensor_constraint0, rollsensor_src0 = None, None, None
+                                delta1, rollsensor_constraint1, rollsensor_src1 = rollsensor_delta + 1, rollsensor_constraint, rollsensor_src
 
                                 new_state = self._initialize_state(init_state=next_state)
 
                                 # re-symbolize input fields, time counters, and update slice generator
                                 symbolic_input_fields = self._symbolize_input_fields(new_state)
                                 symbolic_time_counters = self._symbolize_timecounter(new_state)
-                                symbolic_temperature = self._symbolize_temp(new_state)
+                                symbolic_rollsensor = self._symbolize_rollsensor(new_state)
                                 all_vars = set(symbolic_input_fields.values())
                                 all_vars |= set(symbolic_time_counters.values())
-                                all_vars |= set(symbolic_temperature.values())
+                                all_vars |= set(symbolic_rollsensor.values())
                                 all_vars |= self.config_vars
                                 slice_gen = SliceGenerator(all_vars, bp=expression_bp)
-                                state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, None, None, None, delta1,
-                                                    temp_constraint1, temp_src1))
-                            elif prev_temp > temp_delta:
-                                delta0, temp_constraint0, temp_src0 = temp_delta - 1.0, temp_constraint, temp_src
-                                delta1, temp_constraint1, temp_src1 = None, None, None
+                                state_queue.append((
+                                       new_state, abs_state_id, abs_state, prev_abs_state, None, None, None,
+                                       delta1, rollsensor_constraint1, rollsensor_src1))
+                            elif prev_rollsensor > rollsensor_delta:
+                                delta0, rollsensor_constraint0, rollsensor_src0 = rollsensor_delta - 1, rollsensor_constraint, rollsensor_src
+                                delta1, rollsensor_constraint1, rollsensor_src1 = None, None, None
 
                                 new_state = self._initialize_state(init_state=next_state)
 
                                 # re-symbolize input fields, time counters, and update slice generator
                                 symbolic_input_fields = self._symbolize_input_fields(new_state)
                                 symbolic_time_counters = self._symbolize_timecounter(new_state)
-                                symbolic_temperature = self._symbolize_temp(new_state)
+                                symbolic_rollsensor = self._symbolize_rollsensor(new_state)
                                 all_vars = set(symbolic_input_fields.values())
                                 all_vars |= set(symbolic_time_counters.values())
-                                all_vars |= set(symbolic_temperature.values())
+                                all_vars |= set(symbolic_rollsensor.values())
                                 all_vars |= self.config_vars
                                 slice_gen = SliceGenerator(all_vars, bp=expression_bp)
-                                state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, None, None, None, delta0,
-                                                    temp_constraint0, temp_src0))
+                                state_queue.append((
+                                                   new_state, abs_state_id, abs_state, prev_abs_state, None,
+                                                   None, None, delta0, rollsensor_constraint0, rollsensor_src0))
                             else:
                                 import ipdb; ipdb.set_trace()
 
-                        elif op in ['fpEQ']:
-                            # import ipdb; ipdb.set_trace()
-                            new_state = self._initialize_state(init_state=next_state)
-
-                            # re-symbolize input fields, time counters, and update slice generator
-                            symbolic_input_fields = self._symbolize_input_fields(new_state)
-                            symbolic_time_counters = self._symbolize_timecounter(new_state)
-                            symbolic_temperature = self._symbolize_temp(new_state)
-                            all_vars = set(symbolic_input_fields.values())
-                            all_vars |= set(symbolic_time_counters.values())
-                            all_vars |= set(symbolic_temperature.values())
-                            all_vars |= self.config_vars
-                            slice_gen = SliceGenerator(all_vars, bp=expression_bp)
-                            state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, None, None, None, temp_delta, temp_constraint, temp_src))
-                            continue
+                        # elif op in ['fpEQ']:
+                        #     # import ipdb; ipdb.set_trace()
+                        #     new_state = self._initialize_state(init_state=next_state)
+                        #
+                        #     # re-symbolize input fields, time counters, and update slice generator
+                        #     symbolic_input_fields = self._symbolize_input_fields(new_state)
+                        #     symbolic_time_counters = self._symbolize_timecounter(new_state)
+                        #     symbolic_temperature = self._symbolize_temp(new_state)
+                        #     all_vars = set(symbolic_input_fields.values())
+                        #     all_vars |= set(symbolic_time_counters.values())
+                        #     all_vars |= set(symbolic_temperature.values())
+                        #     all_vars |= self.config_vars
+                        #     slice_gen = SliceGenerator(all_vars, bp=expression_bp)
+                        #     state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, None,
+                        #                         None, None, temp_delta, temp_constraint, temp_src))
+                        #     continue
 
                         if time_delta_and_sources:
                             # print(time_delta_constraint)
@@ -357,13 +453,13 @@ class StateGraphRecoveryAnalysis(Analysis):
                                 # re-symbolize input fields, time counters, and update slice generator
                                 symbolic_input_fields = self._symbolize_input_fields(new_state)
                                 symbolic_time_counters = self._symbolize_timecounter(new_state)
-                                symbolic_temperature = self._symbolize_temp(new_state)
+                                symbolic_rollsensor = self._symbolize_rollsensor(new_state)
                                 all_vars = set(symbolic_input_fields.values())
                                 all_vars |= set(symbolic_time_counters.values())
-                                all_vars |= set(symbolic_temperature.values())
+                                all_vars |= set(symbolic_rollsensor.values())
                                 all_vars |= self.config_vars
                                 slice_gen = SliceGenerator(all_vars, bp=expression_bp)
-                                state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src, delta0, temp_constraint0, temp_src0))
+                                state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src, delta0, rollsensor_constraint0, rollsensor_src0))
 
                                 # append state not satisfy constraint
                                 new_state = self._initialize_state(init_state=next_state)
@@ -371,13 +467,13 @@ class StateGraphRecoveryAnalysis(Analysis):
                                 # re-symbolize input fields, time counters, and update slice generator
                                 symbolic_input_fields = self._symbolize_input_fields(new_state)
                                 symbolic_time_counters = self._symbolize_timecounter(new_state)
-                                symbolic_temperature = self._symbolize_temp(new_state)
+                                symbolic_rollsensor = self._symbolize_rollsensor(new_state)
                                 all_vars = set(symbolic_input_fields.values())
                                 all_vars |= set(symbolic_time_counters.values())
-                                all_vars |= set(symbolic_temperature.values())
+                                all_vars |= set(symbolic_rollsensor.values())
                                 all_vars |= self.config_vars
                                 slice_gen = SliceGenerator(all_vars, bp=expression_bp)
-                                state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src, delta1, temp_constraint1, temp_src1))
+                                state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src, delta1, rollsensor_constraint1, rollsensor_src1))
 
                 # only discover time delta
                 else:
@@ -389,9 +485,10 @@ class StateGraphRecoveryAnalysis(Analysis):
                         symbolic_time_counters = self._symbolize_timecounter(new_state)
                         all_vars = set(symbolic_input_fields.values())
                         all_vars |= set(symbolic_time_counters.values())
-                        if self._temp_addr is not None:
-                            symbolic_temperature = self._symbolize_temp(new_state)
-                            all_vars |= set(symbolic_temperature.values())
+                        all_vars |= set(symbolic_rollsensor.values())
+                        # if self._temp_addr is not None:
+                        #     symbolic_temperature = self._symbolize_temp(new_state)
+                        #     all_vars |= set(symbolic_temperature.values())
                         all_vars |= self.config_vars
                         slice_gen = SliceGenerator(all_vars, bp=expression_bp)
                         state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src, None, None, None))
@@ -407,9 +504,10 @@ class StateGraphRecoveryAnalysis(Analysis):
 
                 all_vars = set(symbolic_input_fields.values())
                 all_vars |= set(symbolic_time_counters.values())
-                if self._temp_addr is not None:
-                    symbolic_temperature = self._symbolize_temp(new_state)
-                    all_vars |= set(symbolic_temperature.values())
+                all_vars |= set(symbolic_rollsensor.values())
+                # if self._temp_addr is not None:
+                #     symbolic_temperature = self._symbolize_temp(new_state)
+                #     all_vars |= set(symbolic_temperature.values())
                 all_vars |= self.config_vars
                 slice_gen = SliceGenerator(all_vars, bp=expression_bp)
 
@@ -437,9 +535,12 @@ class StateGraphRecoveryAnalysis(Analysis):
                                                   time_delta=pre_edge_data['time_delta'],
                                                   time_delta_constraint=pre_edge_data['time_delta_constraint'],
                                                   time_delta_src=pre_edge_data['time_delta_src'],
-                                                  temp_delta=pre_edge_data['temp_delta'],
-                                                  temp_delta_constraint=pre_edge_data['temp_delta_constraint'],
-                                                  temp_delta_src=pre_edge_data['temp_delta_src'],
+                                                  # temp_delta=pre_edge_data['temp_delta'],
+                                                  # temp_delta_constraint=pre_edge_data['temp_delta_constraint'],
+                                                  # temp_delta_src=pre_edge_data['temp_delta_src'],
+                                                  rollsensor_delta=rollsensor_delta,
+                                                  rollsensor_delta_constraint=rollsensor_delta_constraint,
+                                                  rollsensor_delta_src=rollsensor_delta_src,
                                                   )
                         suc_nodes = [edge[2] for edge in state_edge if edge[0] == pre_node[1:] ]
                         for suc_node in suc_nodes:
@@ -450,9 +551,12 @@ class StateGraphRecoveryAnalysis(Analysis):
                                                       time_delta=suc_edge_data['time_delta'],
                                                       time_delta_constraint=suc_edge_data['time_delta_constraint'],
                                                       time_delta_src=suc_edge_data['time_delta_src'],
-                                                      temp_delta=suc_edge_data['temp_delta'],
-                                                      temp_delta_constraint=suc_edge_data['temp_delta_constraint'],
-                                                      temp_delta_src=suc_edge_data['temp_delta_src'],
+                                                      # temp_delta=suc_edge_data['temp_delta'],
+                                                      # temp_delta_constraint=suc_edge_data['temp_delta_constraint'],
+                                                      # temp_delta_src=suc_edge_data['temp_delta_src'],
+                                                      rollsensor_delta=rollsensor_delta,
+                                                      rollsensor_delta_constraint=rollsensor_delta_constraint,
+                                                      rollsensor_delta_src=rollsensor_delta_src,
                                                       )
                     self.state_graph.remove_node(state_node)
 
@@ -490,7 +594,7 @@ class StateGraphRecoveryAnalysis(Analysis):
 
                     if constraint.op == "__eq__" and constraint.args[0] is delta:
                         continue
-                    elif constraint.op in ('ULE'):  # arduino arm32
+                    elif constraint.op in ['ULE']:  # arduino arm32
                         if constraint.args[0].args[1] is delta:
                             if constraint.args[1].args[0].op == 'BVV':
                                 step = constraint.args[1].args[0].args[0]
@@ -595,6 +699,51 @@ class StateGraphRecoveryAnalysis(Analysis):
                                         continue
 
         return steps
+
+    def _discover_rollsensor_deltas(self, state: 'SimState') -> List[Tuple[int,claripy.ast.Base,Tuple[int,int]]]:
+
+        """
+                Discover all possible roll sensor that may be required to transition the current state to successor states.
+
+                :param state:   The current initial state.
+                :return:        A list of ints where each int represents the required interval in number of seconds.
+                """
+        if self._rollsensor_addr is None:
+            return []
+        # import ipdb; ipdb.set_trace()
+        state = self._initialize_state(state)
+        rollsensor_deltas = self._symbolically_advance_rollsensor(state)
+        # setup inspection points to catch where comparison happens
+        constraint_source = {}
+        constraint_logger = ConstraintLogger(constraint_source)
+        bp_0 = BP(when=BP_BEFORE, enabled=True, action=constraint_logger.on_adding_constraints)
+        state.inspect.add_breakpoint('constraints', bp_0)
+
+        next_state = self._traverse_one(state)
+
+        # detect required rollsensor delta
+        steps: List[Tuple[int, claripy.ast.Base, Tuple[int, int]]] = []
+        if rollsensor_deltas:
+            for delta in rollsensor_deltas:
+                for constraint in next_state.solver.constraints:
+                    original_constraint = constraint
+
+                    if constraint.op == "__eq__" and constraint.args[0] is delta:
+                        continue
+                    # TODO
+                    elif constraint.op in ['SLE', 'SGT']:
+                        if constraint.args[0].args[1] is delta:
+                            if constraint.args[1].op == 'BVV':
+                                step = constraint.args[1]._model_concrete.value
+                                steps.append((
+                                    step,
+                                    constraint,
+                                    constraint_source.get(original_constraint, None),
+                                    ))
+                                continue
+
+        return steps
+
 
     def _simplify_constraint(self, constraint: claripy.ast.Base, source: Dict[claripy.ast.Base,Any]) -> Tuple[Optional[claripy.ast.Base],Dict[claripy.ast.Base,Any]]:
         """
@@ -733,6 +882,11 @@ class StateGraphRecoveryAnalysis(Analysis):
                 #     symbolic_v = claripy.FPS(name, claripy.fp.FSORT_DOUBLE)
                 # else:
                 concrete_v = state.solver.eval(v)
+                # if name in {"channel_roll", "channel_pitch"}:
+                #     # write positive numbers
+                #     symbolic_v = claripy.Concat(claripy.BVV(0, 1),
+                #                                 claripy.BVS(name, size * self.project.arch.byte_width - 1))
+                # else:
                 symbolic_v = claripy.BVS(name, size * self.project.arch.byte_width)
                 symbolic_input_vars[name] = symbolic_v
 
@@ -747,10 +901,23 @@ class StateGraphRecoveryAnalysis(Analysis):
         return symbolic_input_vars
 
     def _symbolize_timecounter(self, state: 'SimState') -> Dict[str,claripy.ast.Base]:
-        if self.software == "beremiz":
-            return self._symbolize_timecounter_beremiz(state)
-        elif self.software == 'arduino':
-            return self._symbolize_timecounter_arduino(state)
+        tv_sec_addr = self._time_addr
+        prev = state.memory.load(self._time_addr, size=4, endness=self.project.arch.memory_endness)
+        prev_time = state.solver.eval(prev) + 1
+
+        self._tv_sec_var = claripy.BVS('tv_sec', 4 * self.project.arch.byte_width)
+        state.memory.store(tv_sec_addr, self._tv_sec_var, endness=self.project.arch.memory_endness)
+        state.preconstrainer.preconstrain(
+            claripy.BVV(prev_time, 4 * self.project.arch.byte_width), self._tv_sec_var)
+
+        return {'tv_sec': self._tv_sec_var}
+
+
+
+        # if self.software == "beremiz":
+        #     return self._symbolize_timecounter_beremiz(state)
+        # elif self.software == 'arduino':
+        #     return self._symbolize_timecounter_arduino(state)
 
     # Traffic_Light Beremiz
     def _symbolize_timecounter_beremiz(self, state: 'SimState') -> Dict[str,claripy.ast.Base]:
@@ -785,16 +952,16 @@ class StateGraphRecoveryAnalysis(Analysis):
         return {'tv_sec': self._tv_sec_var}
 
     def _symbolically_advance_timecounter(self, state: 'SimState') -> List[claripy.ast.Bits]:
-        sec_delta = claripy.BVS("sec_delta", self.project.arch.bytes * self.project.arch.byte_width)
-        state.preconstrainer.preconstrain(claripy.BVV(1, self.project.arch.bytes * self.project.arch.byte_width), sec_delta)
+        sec_delta = claripy.BVS("sec_delta", 4 * self.project.arch.byte_width)
+        state.preconstrainer.preconstrain(claripy.BVV(1, 4 * self.project.arch.byte_width), sec_delta)
 
-        tv_sec = state.memory.load(self._time_addr, size=self.project.arch.bytes, endness=self.project.arch.memory_endness)
+        tv_sec = state.memory.load(self._time_addr, size=4, endness=self.project.arch.memory_endness)
         state.memory.store(self._time_addr, tv_sec + sec_delta, endness=self.project.arch.memory_endness)
 
         return [sec_delta]
 
     def _advance_timecounter(self, state: 'SimState', delta: int) -> None:
-        prev = state.memory.load(self._time_addr, size=self.project.arch.bytes, endness=self.project.arch.memory_endness)
+        prev = state.memory.load(self._time_addr, size=4, endness=self.project.arch.memory_endness)
         state.memory.store(self._time_addr, prev + delta, endness=self.project.arch.memory_endness)
 
         if self.software == 'beremiz':
@@ -802,6 +969,32 @@ class StateGraphRecoveryAnalysis(Analysis):
                                         endness=self.project.arch.memory_endness)
             state.memory.store(self._time_addr + self.project.arch.bytes, tv_nsec + 200,
                                endness=self.project.arch.memory_endness)
+
+    def _symbolize_rollsensor(self, state: 'SimState') -> Dict[str, claripy.ast.Base]:
+        rollsensor_addr = self._rollsensor_addr
+
+        prev = state.memory.load(self._rollsensor_addr, size=4, endness=self.project.arch.memory_endness)
+        prev_rollsensor = state.solver.eval(prev)
+
+        self._rollsensor = claripy.BVS('rollsensor', 4*self.project.arch.byte_width)
+        state.memory.store(rollsensor_addr, self._rollsensor, endness=self.project.arch.memory_endness)
+        state.preconstrainer.preconstrain(claripy.BVV(prev_rollsensor, 4*self.project.arch.byte_width), self._rollsensor)
+
+        return {'rollsensor': self._rollsensor}
+
+    def _symbolically_advance_rollsensor(self, state: 'SimState') -> List[claripy.ast.Bits]:
+        rollsensor_delta = claripy.BVS("rollsensor_delta", 4*self.project.arch.byte_width)
+        state.preconstrainer.preconstrain(claripy.BVV(1,4*self.project.arch.byte_width), rollsensor_delta)
+
+        prev = state.memory.load(self._rollsensor_addr, size=4, endness=self.project.arch.memory_endness)
+        state.memory.store(self._rollsensor_addr, prev + rollsensor_delta, endness=self.project.arch.memory_endness)
+
+        return [rollsensor_delta]
+
+    def _advance_rollsensor(self, state: 'SimState', delta) -> None:
+        self._rollsensor = claripy.BVS('rollsensor', 4*self.project.arch.byte_width)
+        state.memory.store(self._rollsensor_addr, self._rollsensor, endness=self.project.arch.memory_endness)
+        state.preconstrainer.preconstrain(claripy.BVV(delta, 4*self.project.arch.byte_width), self._rollsensor)
 
     def _symbolize_temp(self, state: 'SimState') -> Dict[str, claripy.ast.Base]:
         temp_addr = self._temp_addr
@@ -835,13 +1028,32 @@ class StateGraphRecoveryAnalysis(Analysis):
 
         while simgr.active:
             s = simgr.active[0]
+            # print(simgr.active)
+            # print(s.solver.constraints)
             if len(simgr.active) > 1:
                 import ipdb; ipdb.set_trace()
+
+            if s.addr == 0x47e336:
+                print("START!")
+            if s.addr == 0x47e3e4:
+                print("ROLL!")
+            if s.addr == 0x47e491:
+                print("PITCH_A!")
+            if s.addr == 0x47e558:
+                print("PITCH_B!")
+            if s.addr == 0x47e61f:
+                print("RECOVER!")
+            if s.addr == 0x47e75c:
+                print("ABANDON!")
+            if s.addr == 0x47e70d:
+                print("finish recovery!")
+
+                # import ipdb; ipdb.set_trace()
 
             simgr.stash(lambda x: x.addr == self._ret_trap, from_stash='active', to_stash='finished')
 
             simgr.step()
-
+        import ipdb; ipdb.set_trace()
         # import sys
         # sys.stdout.write('\n')
         assert len(simgr.finished) == 1
@@ -851,6 +1063,8 @@ class StateGraphRecoveryAnalysis(Analysis):
         if init_state is not None:
             s = init_state.copy()
             s.ip = self.func.addr
+            # TODO: pass object address to StateGraphRecovery as arguments
+            s.regs.rdi = 0x8f9b88    # mode_flip_addr
         else:
             s = self.project.factory.blank_state(addr=self.func.addr)
             s.regs.rdi = 0xc0000000

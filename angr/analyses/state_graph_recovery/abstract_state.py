@@ -21,9 +21,14 @@ class AbstractStateFields:
     def generate_abstract_state(self, state: 'SimState') -> Tuple[Tuple[str,Any]]:
         lst = [ ]
         for field, (offset, type_, size) in self.fields.items():
-            if type_ == 'double':
+            if type_ == "pin":
+                try:
+                    val = state.solver.eval(state.globals[offset])
+                except KeyError:
+                    val = 0
+            elif type_ == 'double':
                 val = state.solver.eval(state.memory.load(offset, size=size, endness=state.arch.memory_endness).raw_to_fp())
             else:
-                val = state.solver.eval(state.memory.load(offset, size=size))
+                val = state.solver.eval(state.memory.load(offset, size=size, endness=state.arch.memory_endness))
             lst.append((field, val))
         return tuple(lst)
