@@ -121,7 +121,8 @@ class StateGraphRecoveryAnalysis(Analysis):
     """
     def __init__(self, func: 'Function', fields: 'AbstractStateFields', software: str,
                  time_addr: int, rollsensor_addr: int = None,
-                 init_state: Optional['SimState']=None, switch_on: Optional[Callable]=None,
+                 init_state: Optional['SimState']=None, init_variables: Dict = None,
+                 switch_on: Optional[Callable]=None,
                  printstate: Optional[Callable]=None,
                  config_vars: Optional[Set[claripy.ast.Base]]=None,
                  patch_callback: Optional[Callable]=None,
@@ -131,6 +132,7 @@ class StateGraphRecoveryAnalysis(Analysis):
         self.config_vars = config_vars if config_vars is not None else set()
         self.software = software
         self.init_state = init_state
+        self.init_variables = init_variables
         self._switch_on = switch_on
         self._ret_trap: int = 0x1f37ff4a
         self.printstate = printstate
@@ -152,17 +154,20 @@ class StateGraphRecoveryAnalysis(Analysis):
         """
         logs state transition and delta information during delta discovery.
         """
-        def __init__(self, curr_id: int, next_id: int):
+        def __init__(self, curr_id: int, next_id: int, state: 'SimState', delta: claripy.ast.bv):
             self.curr_id = curr_id
             self.next_id = next_id
+            self.state = state
+            self.delta = delta
 
             self.steps = []
             self.constraint = None
             self.constraint_sources = []
+            self.new_value = None
 
 
         def is_changed(self) -> bool:
-            return self.curr_stateid == self.next_stateid
+            return self.curr_id == self.next_id
 
 
 
@@ -241,19 +246,19 @@ class StateGraphRecoveryAnalysis(Analysis):
             # symbolically trace the state
             expression_bp.enabled = True
             next_state = self._traverse_one(prev_state)
-            # for
             expression_bp.enabled = False
 
             abs_state = self.fields.generate_abstract_state(next_state)
             abs_state += (('time_delta', time_delta),
                           # ('tdc', time_delta_constraint),
-                          ('td_src', time_delta_src),
+                          # ('td_src', time_delta_src),
                           # ('temp_delta', temp_delta),
                           # ('temp_src', temp_delta_src)
                           ('rollsensor_delta', rollsensor_delta),
-                          ('rollsensor_src', rollsensor_delta_src)
+                          # ('rollsensor_src', rollsensor_delta_src)
                           )
                         # TODO: remove values in nodes, Now keep them for debug purpose
+                        # TODO: should we add source back?
 
             if switched_on:
                 if abs_state in known_states.keys():
@@ -290,7 +295,7 @@ class StateGraphRecoveryAnalysis(Analysis):
                                       rollsensor_delta_src=rollsensor_delta_src,
                                       label=f'time_delta_constraint={time_delta_constraint},\nrollsensor_delta_constraint={rollsensor_delta_constraint}'
                                       )
-                                        # TODO: add edge label
+
             # discover time deltas
             if not switched_on and self._switch_on is not None:
                 if countdown_timer > 0:
@@ -330,12 +335,13 @@ class StateGraphRecoveryAnalysis(Analysis):
                 #         print(f"[.] Discovered a new temperature {delta} defined at {block_addr:#x}:{stmt_idx}")
                 if self._rollsensor_addr is not None:
                     rollsensor_delta_and_sources = self._discover_rollsensor_deltas(next_state)
-                    for delta, constraint, source in rollsensor_delta_and_sources:
-                        if source is None:
-                            block_addr, stmt_idx = -1, -1
-                        else:
-                            block_addr, stmt_idx = source
-                        print(f"[.] Discovered a new rollsensor {delta} defined at {block_addr:#x}:{stmt_idx}")
+                    # fixme later when i added original step_info
+                    # for delta, constraint, source in rollsensor_delta_and_sources:
+                    #     if source is None:
+                    #         block_addr, stmt_idx = -1, -1
+                    #     else:
+                    #         block_addr, stmt_idx = source
+                    #     print(f"[.] Discovered a new rollsensor {delta} defined at {block_addr:#x}:{stmt_idx}")
 
             # if temp_delta_and_sources or time_delta_and_sources:
             #
@@ -402,57 +408,27 @@ class StateGraphRecoveryAnalysis(Analysis):
 
             if rollsensor_delta_and_sources or time_delta_and_sources:
 
-                if rollsensor_delta_and_sources:
-
-                    for rollsensor_delta, rollsensor_constraint, rollsensor_src in rollsensor_delta_and_sources:
+                if any(x.steps for x in rollsensor_delta_and_sources):
+                    import ipdb; ipdb.set_trace()
+                    for rollsensor_object in rollsensor_delta_and_sources:
                         # append two states in queue
-                        op = rollsensor_constraint.op
-                        prev = next_state.memory.load(self._rollsensor_addr, 4, endness=self.project.arch.memory_endness)
-                        prev_rollsensor = next_state.solver.eval(prev)
-                        # import ipdb; ipdb.set_trace()
-                        if op in ['SLE', 'SGT', 'SGE', 'SLT']:
-                            # TODO: generalize it!
-                            # Question: how to know the size of bit vector?
-                            # Question: how to know if use signed comparison or unsigned?
-                            # if prev_rollsensor < rollsensor_delta:
-                            if next_state.solver.eval(claripy.ops.SLT(claripy.BVV(prev_rollsensor, 32), claripy.BVV(rollsensor_delta, 32))):
-                                delta0, rollsensor_constraint0, rollsensor_src0 = None, None, None
-                                delta1, rollsensor_constraint1, rollsensor_src1 = rollsensor_delta + 2, rollsensor_constraint, rollsensor_src
 
-                                new_state = self._initialize_state(init_state=next_state)
 
-                                # re-symbolize input fields, time counters, and update slice generator
-                                symbolic_input_fields = self._symbolize_input_fields(new_state)
-                                symbolic_time_counters = self._symbolize_timecounter(new_state)
-                                symbolic_rollsensor = self._symbolize_rollsensor(new_state)
-                                all_vars = set(symbolic_input_fields.values())
-                                all_vars |= set(symbolic_time_counters.values())
-                                all_vars |= set(symbolic_rollsensor.values())
-                                all_vars |= self.config_vars
-                                slice_gen = SliceGenerator(all_vars, bp=expression_bp)
-                                state_queue.append((
-                                       new_state, abs_state_id, abs_state, prev_abs_state, None, None, None,
-                                       delta1, rollsensor_constraint1, rollsensor_src1))
-                            elif next_state.solver.eval(claripy.ops.SGT(claripy.BVV(prev_rollsensor, 32), claripy.BVV(rollsensor_delta, 32))):
-                                delta0, rollsensor_constraint0, rollsensor_src0 = rollsensor_delta - 2, rollsensor_constraint, rollsensor_src
-                                delta1, rollsensor_constraint1, rollsensor_src1 = None, None, None
+                        new_state = self._initialize_state(init_state=next_state)
 
-                                new_state = self._initialize_state(init_state=next_state)
+                        # re-symbolize input fields, time counters, and update slice generator
+                        symbolic_input_fields = self._symbolize_input_fields(new_state)
+                        symbolic_time_counters = self._symbolize_timecounter(new_state)
+                        symbolic_rollsensor = self._symbolize_rollsensor(new_state)
+                        all_vars = set(symbolic_input_fields.values())
+                        all_vars |= set(symbolic_time_counters.values())
+                        all_vars |= set(symbolic_rollsensor.values())
+                        all_vars |= self.config_vars
+                        slice_gen = SliceGenerator(all_vars, bp=expression_bp)
+                        state_queue.append((
+                               new_state, abs_state_id, abs_state, prev_abs_state, None, None, None,
+                               rollsensor_object.new_value, rollsensor_object.constraint, rollsensor_object.constraint_sources))
 
-                                # re-symbolize input fields, time counters, and update slice generator
-                                symbolic_input_fields = self._symbolize_input_fields(new_state)
-                                symbolic_time_counters = self._symbolize_timecounter(new_state)
-                                symbolic_rollsensor = self._symbolize_rollsensor(new_state)
-                                all_vars = set(symbolic_input_fields.values())
-                                all_vars |= set(symbolic_time_counters.values())
-                                all_vars |= set(symbolic_rollsensor.values())
-                                all_vars |= self.config_vars
-                                slice_gen = SliceGenerator(all_vars, bp=expression_bp)
-                                state_queue.append((
-                                                   new_state, abs_state_id, abs_state, prev_abs_state, None,
-                                                   None, None, delta0, rollsensor_constraint0, rollsensor_src0))
-                            else:
-                                import ipdb; ipdb.set_trace()
 
                         # elif op in ['fpEQ']:
                         #     # import ipdb; ipdb.set_trace()
@@ -471,6 +447,7 @@ class StateGraphRecoveryAnalysis(Analysis):
                         #                         None, None, temp_delta, temp_constraint, temp_src))
                         #     continue
 
+                        # fixme: using new Delta objects
                         if time_delta_and_sources:
                             # print(time_delta_constraint)
                             for time_delta, time_constraint, time_src in time_delta_and_sources:
@@ -486,7 +463,8 @@ class StateGraphRecoveryAnalysis(Analysis):
                                 all_vars |= set(symbolic_rollsensor.values())
                                 all_vars |= self.config_vars
                                 slice_gen = SliceGenerator(all_vars, bp=expression_bp)
-                                state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src, delta0, rollsensor_constraint0, rollsensor_src0))
+                                state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src,
+                                                    rollsensor_object.new_value, rollsensor_object.constraint, rollsensor_object.constraint_sources))
 
                                 # append state not satisfy constraint
                                 new_state = self._initialize_state(init_state=next_state)
@@ -500,9 +478,10 @@ class StateGraphRecoveryAnalysis(Analysis):
                                 all_vars |= set(symbolic_rollsensor.values())
                                 all_vars |= self.config_vars
                                 slice_gen = SliceGenerator(all_vars, bp=expression_bp)
-                                state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src, delta1, rollsensor_constraint1, rollsensor_src1))
+                                state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src, None, None, None))
 
                 # only discover time delta
+                # fixme: using new Delta objects
                 else:
                     for time_delta, time_constraint, time_src in time_delta_and_sources:
                         new_state = self._initialize_state(init_state=next_state)
@@ -752,17 +731,18 @@ class StateGraphRecoveryAnalysis(Analysis):
         state.inspect.add_breakpoint('constraints', bp_0)
 
         next_states = self._traverse_one(state, discover=True)
-        # import ipdb; ipdb.set_trace()
+        import ipdb; ipdb.set_trace()
         # next_state = next_states[0]
         # detect required rollsensor delta
-        steps: List[Deltas] = []       # fixme: add type
+        steps: List[Deltas] = []
         deltas_info = []
         if rollsensor_deltas:
             for next_state in next_states:
                 next_id = next_state.solver.eval(next_state.memory.load(self.state_id_addr,1))
-                delta_info = {'curr_id': curr_id, 'next_id': next_id, 'step_info': []}
+                delta_info = {'curr_id': curr_id, 'next_id': next_id, 'state': next_state, 'step_info': []}
 
                 for delta in rollsensor_deltas:     # Question: in which case it will return multiple deltas?
+                    delta_info['delta'] = delta
                     if next_state.solver.satisfiable(extra_constraints=(delta == prev_rollsensor,)):
                         # fixme: should we remove this part since we are checking state id
                         # continue
@@ -856,8 +836,8 @@ class StateGraphRecoveryAnalysis(Analysis):
 
                         elif constraint.op in ['SLE', 'SLT', 'SGT', 'SGE']:
                             if constraint.args[0] is delta:      # fixme
-                                if constraint.args[1].op == 'BVV':  # TODO: here should return a bitvector not a constant
-                                    step = constraint.args[1]
+                                if constraint.args[1].op == 'BVV':
+                                    step = constraint.args[1]._model_concrete.value
                                     # TODO: add delta range (-18000, 18000)
 
                                     step_info = (
@@ -869,8 +849,9 @@ class StateGraphRecoveryAnalysis(Analysis):
                                     delta_info['step_info'].append(step_info)
                                     continue
                 deltas_info.append(delta_info)
-            import ipdb; ipdb.set_trace()
+            # import ipdb; ipdb.set_trace()
 
+            # TODO: put this part in a function
             for each_delta_info in deltas_info:
                 if each_delta_info['curr_id'] == each_delta_info['next_id']:
                     # here if we want to track constraints for self loops, fixme
@@ -881,7 +862,8 @@ class StateGraphRecoveryAnalysis(Analysis):
                         if steps[i].next_id == each_delta_info['next_id']:
                             one_step = steps[i]
                     else:
-                        one_step = self.Deltas(curr_id=each_delta_info['curr_id'], next_id=each_delta_info['next_id'])
+                        one_step = self.Deltas(curr_id=each_delta_info['curr_id'], next_id=each_delta_info['next_id'],
+                                               state=each_delta_info['state'], delta=each_delta_info['delta'])
                         i = len(steps)
                         steps.append(one_step)
 
@@ -890,25 +872,29 @@ class StateGraphRecoveryAnalysis(Analysis):
                     new_constraint = None
                     for one_step_info in all_step_info:
                         # create new constraint
-                        if new_constraint:
+                        if new_constraint is not None:
                             # logic AND all constraints in one state
                             new_constraint = claripy.And(new_constraint, one_step_info[1])
                         else:
                             new_constraint = one_step_info[1]
-
-                        if one_step.constraint:
-                            # logic OR all constraints in different states
-                            one_step.constraint = claripy.Or(new_constraint, one_step.constraint)
-                        else:
-                            one_step.constraint = new_constraint
-
 
                         if one_step_info[0] not in one_step.steps:
                             one_step.steps.append(one_step_info[0])
                         if one_step_info[2] not in one_step.constraint_sources:
                             one_step.constraint_sources.append(one_step_info[2])
 
+                    if one_step.constraint:
+                        # logic OR all constraints in different states
+                        one_step.constraint = claripy.Or(new_constraint, one_step.constraint)
+                    else:
+                        one_step.constraint = new_constraint
                     steps[i] = one_step
+
+            for each in steps:
+                blank_state = self.project.factory.blank_state()
+                blank_state.solver.add(each.constraint)
+                each.new_value = blank_state.solver.min(each.delta, signed=True) + 1     # fixme: min or max or eval?
+
         # TODO: return original step_info
         return steps
 
