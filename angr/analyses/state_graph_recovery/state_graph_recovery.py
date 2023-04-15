@@ -143,6 +143,7 @@ class StateGraphRecoveryAnalysis(Analysis):
 
         self.traverse()
 
+
     def traverse(self):
 
         # create an empty state graph
@@ -216,6 +217,7 @@ class StateGraphRecoveryAnalysis(Analysis):
                           ('temp_delta', temp_delta),
                           ('temp_src', temp_delta_src)
                           )
+
             if switched_on:
                 if abs_state in known_states.keys():
                     abs_state_id = known_states[abs_state]
@@ -276,6 +278,7 @@ class StateGraphRecoveryAnalysis(Analysis):
                     else:
                         block_addr, stmt_idx = source
                     print(f"[.] Discovered a new time interval {delta} defined at {block_addr:#x}:{stmt_idx}")
+
                 if self._temp_addr is not None:
                     temp_delta_and_sources = self._discover_temp_deltas(next_state)
                     for delta, constraint, source in temp_delta_and_sources:
@@ -300,9 +303,6 @@ class StateGraphRecoveryAnalysis(Analysis):
                             if prev_temp < temp_delta:
                                 delta0, temp_constraint0, temp_src0 = None, None, None
                                 delta1, temp_constraint1, temp_src1 = temp_delta + 1.0, temp_constraint, temp_src
-
-                                new_state = self._initialize_state(init_state=next_state)
-
                                 # re-symbolize input fields, time counters, and update slice generator
                                 symbolic_input_fields = self._symbolize_input_fields(new_state)
                                 symbolic_time_counters = self._symbolize_timecounter(new_state)
@@ -334,38 +334,8 @@ class StateGraphRecoveryAnalysis(Analysis):
                             else:
                                 import ipdb; ipdb.set_trace()
 
-                        elif op in ['fpEQ']:
-                            # import ipdb; ipdb.set_trace()
-                            new_state = self._initialize_state(init_state=next_state)
-
-                            # re-symbolize input fields, time counters, and update slice generator
-                            symbolic_input_fields = self._symbolize_input_fields(new_state)
-                            symbolic_time_counters = self._symbolize_timecounter(new_state)
-                            symbolic_temperature = self._symbolize_temp(new_state)
-                            all_vars = set(symbolic_input_fields.values())
-                            all_vars |= set(symbolic_time_counters.values())
-                            all_vars |= set(symbolic_temperature.values())
-                            all_vars |= self.config_vars
-                            slice_gen = SliceGenerator(all_vars, bp=expression_bp)
-                            state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, None, None, None, temp_delta, temp_constraint, temp_src))
-                            continue
-
-                        if time_delta_and_sources:
-                            # print(time_delta_constraint)
-                            for time_delta, time_constraint, time_src in time_delta_and_sources:
-                                # append state satisfy constraint
-                                new_state = self._initialize_state(init_state=next_state)
-
-                                # re-symbolize input fields, time counters, and update slice generator
-                                symbolic_input_fields = self._symbolize_input_fields(new_state)
-                                symbolic_time_counters = self._symbolize_timecounter(new_state)
-                                symbolic_temperature = self._symbolize_temp(new_state)
-                                all_vars = set(symbolic_input_fields.values())
-                                all_vars |= set(symbolic_time_counters.values())
-                                all_vars |= set(symbolic_temperature.values())
-                                all_vars |= self.config_vars
-                                slice_gen = SliceGenerator(all_vars, bp=expression_bp)
                                 state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src, delta0, temp_constraint0, temp_src0))
+
 
                                 # append state not satisfy constraint
                                 new_state = self._initialize_state(init_state=next_state)
@@ -379,9 +349,12 @@ class StateGraphRecoveryAnalysis(Analysis):
                                 all_vars |= set(symbolic_temperature.values())
                                 all_vars |= self.config_vars
                                 slice_gen = SliceGenerator(all_vars, bp=expression_bp)
+
                                 state_queue.append((new_state, abs_state_id, abs_state, prev_abs_state, time_delta, time_constraint, time_src, delta1, temp_constraint1, temp_src1))
 
+
                 # only discover time delta
+                # fixme: using new Delta objects
                 else:
                     for time_delta, time_constraint, time_src in time_delta_and_sources:
                         new_state = self._initialize_state(init_state=next_state)
@@ -619,6 +592,198 @@ class StateGraphRecoveryAnalysis(Analysis):
 
         return steps
 
+# <<<<<<< Updated upstream
+# =======
+#     def _discover_rollsensor_deltas(self, state: 'SimState') -> List[Deltas]:
+#         """
+#         Discover all possible roll sensor that may be required to transition the current state to successor states.
+#
+#         :param state:   The current initial state.
+#         :return:        A list of ints where each int represents the required interval in number of seconds.
+#         """
+#         if self._rollsensor_addr is None:
+#             return []
+#         # import ipdb; ipdb.set_trace()
+#         state = self._initialize_state(state)
+#         prev = state.memory.load(self._rollsensor_addr, size=4, endness=self.project.arch.memory_endness)
+#         prev_rollsensor = state.solver.eval(prev)
+#         curr_id = state.solver.eval(state.memory.load(self.state_id_addr, 1))
+#         rollsensor_deltas = self._symbolically_advance_rollsensor(state)
+#         # setup inspection points to catch where comparison happens
+#         constraint_source = {}
+#         constraint_logger = ConstraintLogger(constraint_source)
+#         bp_0 = BP(when=BP_BEFORE, enabled=True, action=constraint_logger.on_adding_constraints)
+#         state.inspect.add_breakpoint('constraints', bp_0)
+#
+#         next_states = self._traverse_one(state, discover=True)
+#         # import ipdb; ipdb.set_trace()
+#         # next_state = next_states[0]
+#         # detect required rollsensor delta
+#         steps: List[Deltas] = []
+#         deltas_info = []
+#         if rollsensor_deltas:
+#             for next_state in next_states:
+#                 next_id = next_state.solver.eval(next_state.memory.load(self.state_id_addr,1))
+#                 delta_info = {'curr_id': curr_id, 'next_id': next_id, 'state': next_state, 'step_info': []}
+#
+#                 for delta in rollsensor_deltas:     # Question: in which case it will return multiple deltas?
+#                     delta_info['delta'] = delta
+#                     if next_state.solver.satisfiable(extra_constraints=(delta == prev_rollsensor,)):
+#                         # fixme: should we remove this part since we are checking state id
+#                         # continue
+#                         pass
+#
+#
+#                     for constraint in next_state.solver.constraints:
+#                         original_constraint = constraint
+#
+#                         if delta.args[0] in constraint.variables:
+#                             # add logic to simplify -1*var
+#                             # import ipdb; ipdb.set_trace()
+#                             op = constraint.op
+#
+#                             if constraint.args[0].op == '__mul__' and constraint.args[0].args[1] is delta   \
+#                                     and constraint.args[0].args[0].op == 'BVV'  \
+#                                     and constraint.args[0].args[0] is claripy.BVV(-1, constraint.args[0].args[0].args[1]):
+#                                 if op == 'SLE':  # Question: can this be generalized?
+#                                     left = constraint.args[0].args[1]
+#                                     right = constraint.args[1] * -1
+#                                     simplified_constraint = claripy.ops.SGE(left, right)
+#                                     constraint = simplified_constraint
+#                                     # import ipdb; ipdb.set_trace()
+#                                 elif op == 'SGE':
+#                                     left = constraint.args[0].args[1]
+#                                     right = constraint.args[1] * -1
+#                                     simplified_constraint = claripy.ops.SLE(left, right)
+#                                     constraint = simplified_constraint
+#                                     # import ipdb; ipdb.set_trace()
+#                                 elif op == 'SLT':
+#                                     left = constraint.args[0].args[1]
+#                                     right = constraint.args[1] * -1
+#                                     simplified_constraint = claripy.ops.SGT(left, right)
+#                                     constraint = simplified_constraint
+#                                     # import ipdb; ipdb.set_trace()
+#                                 elif op == 'SGT':
+#                                     left = constraint.args[0].args[1]
+#                                     right = constraint.args[1] * -1
+#                                     simplified_constraint = claripy.ops.SLT(left, right)
+#                                     constraint = simplified_constraint
+#                                     # import ipdb; ipdb.set_trace()
+#                                 else:
+#                                     import ipdb; ipdb.set_trace()
+#                             '''
+#                             if constraint.args[0].op == '__add__':
+#
+#                                 arg_num = len(constraint.args[0].args)
+#                                 if arg_num != 2:
+#                                     import ipdb; ipdb.set_trace()
+#
+#                                 # TODO: generalize it when -1 is in different position
+#                                 if constraint.args[0].args[0].op == '__mul__' and constraint.args[0].args[1].op == '__mul__' \
+#                                         and constraint.args[0].args[0].args[0].op == 'BVV' \
+#                                         and constraint.args[0].args[0].args[0] is claripy.BVV(-1, constraint.args[0].args[0].args[0].args[1]) \
+#                                         and constraint.args[0].args[1].args[0].op == 'BVV' \
+#                                         and constraint.args[0].args[1].args[0] is claripy.BVV(-1, constraint.args[0].args[0].args[0].args[1]):
+#                                     if op == 'SLE':     # Question: can this be generalized?
+#                                         left = constraint.args[0].args[0].args[1] + constraint.args[0].args[1].args[1]
+#                                         right = constraint.args[1] * -1
+#                                         simplified_constraint = claripy.ops.SGE(left, right)
+#                                         constraint = simplified_constraint
+#                                         # import ipdb; ipdb.set_trace()
+#                                     elif op == 'SGE':
+#                                         left = constraint.args[0].args[0].args[1] + constraint.args[0].args[1].args[1]
+#                                         right = constraint.args[1] * -1
+#                                         simplified_constraint = claripy.ops.SLE(left, right)
+#                                         constraint = simplified_constraint
+#                                         # import ipdb; ipdb.set_trace()
+#                                     elif op == 'SLT':
+#                                         left = constraint.args[0].args[0].args[1] + constraint.args[0].args[1].args[1]
+#                                         right = constraint.args[1] * -1
+#                                         simplified_constraint = claripy.ops.SGT(left, right)
+#                                         constraint = simplified_constraint
+#                                         # import ipdb; ipdb.set_trace()
+#                                     elif op == 'SGT':
+#                                         left = constraint.args[0].args[0].args[1] + constraint.args[0].args[1].args[1]
+#                                         right = constraint.args[1] * -1
+#                                         simplified_constraint = claripy.ops.SLT(left, right)
+#                                         constraint = simplified_constraint
+#                                         # import ipdb; ipdb.set_trace()
+#                                     else:
+#                                         import ipdb; ipdb.set_trace()
+#                             '''
+#
+#                         else:
+#                             # pass if delta is not in this constraint
+#                             continue
+#
+#                         if constraint.op == "__eq__" and constraint.args[0] is delta:
+#                             continue
+#
+#                         elif constraint.op in ['SLE', 'SLT', 'SGT', 'SGE']:
+#                             if constraint.args[0] is delta:      # fixme
+#                                 if constraint.args[1].op == 'BVV':
+#                                     step = constraint.args[1]._model_concrete.value
+#                                     # TODO: add delta range (-18000, 18000)
+#
+#                                     step_info = (
+#                                         step,
+#                                         constraint,
+#                                         constraint_source.get(original_constraint, None),
+#                                         )
+#
+#                                     delta_info['step_info'].append(step_info)
+#                                     continue
+#                 deltas_info.append(delta_info)
+#             import ipdb; ipdb.set_trace()
+#
+#             # TODO: put this part in a function
+#             for each_delta_info in deltas_info:
+#                 if each_delta_info['curr_id'] == each_delta_info['next_id']:
+#                     # here if we want to track constraints for self loops, fixme
+#                     continue
+#                 else:
+#                     # add object to list
+#                     for i in range(len(steps)):
+#                         if steps[i].next_id == each_delta_info['next_id']:
+#                             one_step = steps[i]
+#                     else:
+#                         one_step = self.Deltas(curr_id=each_delta_info['curr_id'], next_id=each_delta_info['next_id'],
+#                                                state=each_delta_info['state'], delta=each_delta_info['delta'])
+#                         i = len(steps)
+#                         steps.append(one_step)
+#
+#                     # parse info and update object
+#                     all_step_info = each_delta_info['step_info']
+#                     new_constraint = None
+#                     for one_step_info in all_step_info:
+#                         # create new constraint
+#                         if new_constraint is not None:
+#                             # logic AND all constraints in one state
+#                             new_constraint = claripy.And(new_constraint, one_step_info[1])
+#                         else:
+#                             new_constraint = one_step_info[1]
+#
+#                         if one_step_info[0] not in one_step.steps:
+#                             one_step.steps.append(one_step_info[0])
+#                         if one_step_info[2] not in one_step.constraint_sources:
+#                             one_step.constraint_sources.append(one_step_info[2])
+#
+#                     if one_step.constraint:
+#                         # logic OR all constraints in different states
+#                         one_step.constraint = claripy.Or(new_constraint, one_step.constraint)
+#                     else:
+#                         one_step.constraint = new_constraint
+#                     steps[i] = one_step
+#
+#             for each in steps:
+#                 blank_state = self.project.factory.blank_state()
+#                 blank_state.solver.add(each.constraint)
+#                 each.new_value = blank_state.solver.min(each.delta, signed=True) + 1
+#
+#         # TODO: return original step_info
+#         return steps
+#
+# >>>>>>> Stashed changes
     def _simplify_constraint(self, constraint: claripy.ast.Base, source: Dict[claripy.ast.Base,Any]) -> Tuple[Optional[claripy.ast.Base],Dict[claripy.ast.Base,Any]]:
         """
         Attempt to simplify a constraint and generate a new source mapping.
