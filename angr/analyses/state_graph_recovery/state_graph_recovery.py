@@ -284,6 +284,8 @@ class StateGraphRecoveryAnalysis(Analysis):
                         else:
                             block_addr, stmt_idx = source
                         print(f"[.] Discovered a new temperature {delta} defined at {block_addr:#x}:{stmt_idx}")
+                else:
+                    temp_delta_and_sources = {}
 
             if temp_delta_and_sources or time_delta_and_sources:
 
@@ -501,8 +503,29 @@ class StateGraphRecoveryAnalysis(Analysis):
                                         constraint_source.get(original_constraint, None),
                                     ))
                                     continue
-
-                    elif constraint.op == "__ne__":
+                    elif constraint.op == "__lt__":
+                        if constraint.args[0].args[1] is delta:
+                            if constraint.args[1].op == 'BVV':
+                                step = constraint.args[1]._model_concrete.value
+                                if step != 0:
+                                    steps.append((
+                                        step,
+                                        constraint,
+                                        constraint_source.get(original_constraint, None),
+                                    ))
+                                    continue
+                        elif constraint.args[0] is delta:
+                            # found a potential step
+                            if constraint.args[1].op == 'BVV':
+                                step = constraint.args[1]._model_concrete.value
+                                if step != 0:
+                                    steps.append((
+                                        step,
+                                        constraint,
+                                        constraint_source.get(original_constraint, None),
+                                    ))
+                                    continue
+                    elif constraint.op in ("__ne__"):
                         if constraint.args[0] is delta:     # amd64
                             # found a potential step
                             if constraint.args[1].op == 'BVV':
@@ -835,8 +858,18 @@ class StateGraphRecoveryAnalysis(Analysis):
 
         while simgr.active:
             s = simgr.active[0]
+            print(s)
             if len(simgr.active) > 1:
                 import ipdb; ipdb.set_trace()
+
+            if s.addr == 0x2161:
+                print("START!!")
+            elif s.addr == 0x219d:
+                print("YELLOW!!")
+            elif s.addr == 0x21d5:
+                print("RED!!")
+            elif s.addr == 0x220f:
+                print("GREEN!!")
 
             simgr.stash(lambda x: x.addr == self._ret_trap, from_stash='active', to_stash='finished')
 
