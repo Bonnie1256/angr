@@ -409,7 +409,7 @@ class StateGraphRecoveryAnalysis(Analysis):
             if rollsensor_delta_and_sources or time_delta_and_sources:
 
                 if any(x.steps for x in rollsensor_delta_and_sources):
-                    import ipdb; ipdb.set_trace()
+                    # import ipdb; ipdb.set_trace()
                     for rollsensor_object in rollsensor_delta_and_sources:
                         # append two states in queue
 
@@ -731,7 +731,7 @@ class StateGraphRecoveryAnalysis(Analysis):
         state.inspect.add_breakpoint('constraints', bp_0)
 
         next_states = self._traverse_one(state, discover=True)
-        import ipdb; ipdb.set_trace()
+        # import ipdb; ipdb.set_trace()
         # next_state = next_states[0]
         # detect required rollsensor delta
         steps: List[Deltas] = []
