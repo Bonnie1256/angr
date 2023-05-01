@@ -246,6 +246,10 @@ class StateGraphRecoveryAnalysis(Analysis):
             # symbolically trace the state
             expression_bp.enabled = True
             next_state = self._traverse_one(prev_state)
+
+            # print(f"motor throttle in {next_state.memory.load(0xc00042f0 + 0x28, 4, endness=self.project.arch.memory_endness).raw_to_fp()}")
+            # print(f"motor throttle out {next_state.memory.load(0xc00042f0+0x2c,4, endness=self.project.arch.memory_endness).raw_to_fp()}")
+            # import ipdb; ipdb.set_trace()
             expression_bp.enabled = False
 
             abs_state = self.fields.generate_abstract_state(next_state)
@@ -586,7 +590,7 @@ class StateGraphRecoveryAnalysis(Analysis):
         state.inspect.add_breakpoint('constraints', bp_0)
 
         next_state = self._traverse_one(state)
-
+        import ipdb; ipdb.set_trace()
         # detect required time delta
         # TODO: Extend it to more than just seconds
         steps: List[Tuple[int,claripy.ast.Base,Tuple[int,int]]] = [ ]
@@ -1183,8 +1187,9 @@ class StateGraphRecoveryAnalysis(Analysis):
 
         while simgr.active:
             s = simgr.active[0]
-            # print(simgr.active)
-            # print(s.solver.constraints)
+            print(simgr.active)
+            print(s.memory.load(self._time_addr, 4, endness=self.project.arch.memory_endness))
+            # print(s.solver.constraints[-10:])
 
             if not discover:    # ignore multiple states when discovering deltas
                 if len(simgr.active) > 1:
@@ -1213,6 +1218,9 @@ class StateGraphRecoveryAnalysis(Analysis):
                 print("ABANDON!")
             if s.addr == 0x47e70d:
                 print("finish recovery!")
+            if s.addr == 0x47e336:
+                print("check time")
+                import ipdb; ipdb.set_trace()
 
             # import ipdb; ipdb.set_trace()
 
