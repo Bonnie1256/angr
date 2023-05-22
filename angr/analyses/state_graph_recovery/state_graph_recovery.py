@@ -6,7 +6,7 @@ import networkx
 
 import claripy
 
-from ...sim_options import NO_CROSS_INSN_OPT, SYMBOL_FILL_UNCONSTRAINED_MEMORY, SYMBOL_FILL_UNCONSTRAINED_REGISTERS
+from ...sim_options import NO_CROSS_INSN_OPT, SYMBOL_FILL_UNCONSTRAINED_MEMORY, SYMBOL_FILL_UNCONSTRAINED_REGISTERS, SIMPLIFY_CONSTRAINTS
 from ...state_plugins.inspect import BP_BEFORE, BP_AFTER, BP
 from ..analysis import Analysis, AnalysesHub
 
@@ -1253,6 +1253,7 @@ class StateGraphRecoveryAnalysis(Analysis):
         # disable warnings
         s.options[SYMBOL_FILL_UNCONSTRAINED_MEMORY] = True
         s.options[SYMBOL_FILL_UNCONSTRAINED_REGISTERS] = True
+        s.options[SIMPLIFY_CONSTRAINTS] = True
 
         if self.project.arch.call_pushes_ret:
             s.stack_push(claripy.BVV(self._ret_trap, self.project.arch.bits))
