@@ -165,6 +165,7 @@ class StateGraphRecoveryAnalysis(Analysis):
             self.constraint_sources = []
             self.new_value = None
 
+            # self.same_range = False
 
         def is_changed(self) -> bool:
             return self.curr_id == self.next_id
@@ -590,7 +591,7 @@ class StateGraphRecoveryAnalysis(Analysis):
         state.inspect.add_breakpoint('constraints', bp_0)
 
         next_state = self._traverse_one(state)
-        import ipdb; ipdb.set_trace()
+        # import ipdb; ipdb.set_trace()
         # detect required time delta
         # TODO: Extend it to more than just seconds
         steps: List[Tuple[int,claripy.ast.Base,Tuple[int,int]]] = [ ]
@@ -604,6 +605,22 @@ class StateGraphRecoveryAnalysis(Analysis):
                                                                                                    self._expression_source)
                         if simplified_constraint is not None:
                             constraint = simplified_constraint
+
+                    if constraint.op == "__eq__" and constraint.args[0].op == "Extract" and constraint.args[1].op == "BVV" and constraint.args[1].args[0] == 0 and delta.args[0] in constraint.variables:
+                        # < Bool tv_sec_4966_32[11:0] <= 0x9c4 >, < Bool tv_sec_4966_32[31:12] == 0x0 > -----> tv_sec_4966_32 <= 0x9c4
+                        # import ipdb; ipdb.set_trace()
+                        cons = [con for con in next_state.solver.constraints if len(con.variables) == 2 and len(con.args) == 2]
+                        if cons:
+                            left = cons[0].args[0].args[0].args[2] + cons[0].args[0].args[1].args[2]
+                            constraint = claripy.ops.ULE(left, claripy.BVV(cons[0].args[1].args[0], cons[0].args[0].args[0].args[2].length))
+                            step = constraint.args[1].args[0]
+                            if step != 0:
+                                steps.append((
+                                    step,
+                                    constraint,
+                                    constraint_source.get(original_constraint, None),
+                                ))
+                                continue
 
                     if constraint.op == "__eq__" and constraint.args[0] is delta:
                         continue
@@ -740,14 +757,18 @@ class StateGraphRecoveryAnalysis(Analysis):
         # detect required rollsensor delta
         steps: List[Deltas] = []
         deltas_info = []
+
+        # ------------------------------------------------------------
         if rollsensor_deltas:
             for next_state in next_states:
                 next_id = next_state.solver.eval(next_state.memory.load(self.state_id_addr,1))
-                delta_info = {'curr_id': curr_id, 'next_id': next_id, 'state': next_state, 'step_info': []}
+                delta_info = {'curr_id': curr_id, 'next_id': next_id, 'state': next_state, 'step_info': [], 'same_range': False}
 
                 for delta in rollsensor_deltas:     # Question: in which case it will return multiple deltas?
                     delta_info['delta'] = delta
                     if next_state.solver.satisfiable(extra_constraints=(delta == prev_rollsensor,)):
+                        # import ipdb; ipdb.set_trace()
+                        delta_info['same_range'] = True
                         # fixme: should we remove this part since we are checking state id
                         # continue
                         pass
@@ -757,6 +778,7 @@ class StateGraphRecoveryAnalysis(Analysis):
                         original_constraint = constraint
 
                         if delta.args[0] in constraint.variables:
+                            print(constraint)
                             # add logic to simplify -1*var
                             # import ipdb; ipdb.set_trace()
                             op = constraint.op
@@ -852,15 +874,35 @@ class StateGraphRecoveryAnalysis(Analysis):
 
                                     delta_info['step_info'].append(step_info)
                                     continue
+
+                        elif constraint.op == 'Or' and delta.args[0] in constraint.variables:     # wierd constraint, fixme
+                            # in Recovery
+                            # import ipdb; ipdb.set_trace()
+                            blank = self.project.factory.blank_state()
+                            blank.solver.add(constraint)
+                            step = blank.solver.min(delta)
+                            print(step)
+                            step_info = (
+                                step,
+                                constraint,
+                                constraint_source.get(original_constraint, None),
+                            )
+
+                            delta_info['step_info'].append(step_info)
+                            continue
+
                 deltas_info.append(delta_info)
             # import ipdb; ipdb.set_trace()
 
             # TODO: put this part in a function
             for each_delta_info in deltas_info:
+                # fixme here adding checks for other output variables
                 if each_delta_info['curr_id'] == each_delta_info['next_id']:
-                    # here if we want to track constraints for self loops, fixme
+                    # fixme here if we want to track constraints for self loops
+                    # import ipdb; ipdb.set_trace()
                     continue
                 else:
+                # if each_delta_info['step_info']:
                     # add object to list
                     for i in range(len(steps)):
                         if steps[i].next_id == each_delta_info['next_id']:
@@ -898,6 +940,22 @@ class StateGraphRecoveryAnalysis(Analysis):
                 blank_state = self.project.factory.blank_state()
                 blank_state.solver.add(each.constraint)
                 each.new_value = blank_state.solver.min(each.delta, signed=True) + 1     # fixme: min or max or eval?
+            # -----------------------------------
+
+            if len(steps) == 0 and len(next_states) == 2:
+                # found branches but not deltas
+                import ipdb; ipdb.set_trace()
+                for each_delta_info in deltas_info:
+                    if not each_delta_info['same_range']:
+                        one_step = self.Deltas(curr_id=each_delta_info['curr_id'], next_id=each_delta_info['next_id'],
+                                               state=each_delta_info['state'], delta=each_delta_info['delta'])
+
+                        one_step.steps.append(each_delta_info['step_info'][0][0])
+                        one_step.constraint = each_delta_info['step_info'][0][1]
+                        one_step.constraint_sources.append(each_delta_info['step_info'][0][2])
+                        one_step.new_value = each_delta_info['step_info'][0][0]
+                        steps.append(one_step)
+
 
         # TODO: return original step_info
         return steps
@@ -1150,6 +1208,17 @@ class StateGraphRecoveryAnalysis(Analysis):
         state.memory.store(self._rollsensor_addr, rollsensor_delta, endness=self.project.arch.memory_endness)
         return [rollsensor_delta]
 
+    def _symbolically_advance_rollsensor_concolic(self, state: 'SimState') -> List[claripy.ast.Bits]:
+        rollsensor_delta = claripy.BVS("rollsensor_delta", 4*self.project.arch.byte_width)
+        state.preconstrainer.preconstrain(claripy.BVV(1, 4*self.project.arch.byte_width), rollsensor_delta)
+        # roll sensor range is (-180, 180)
+        # state.add_constraints(claripy.ops.SGT(rollsensor_delta, -18000), claripy.ops.SLT(rollsensor_delta, 18000))
+
+        prev = state.memory.load(self._rollsensor_addr, size=4, endness=self.project.arch.memory_endness)
+        state.memory.store(self._rollsensor_addr, prev + rollsensor_delta, endness=self.project.arch.memory_endness)
+        # state.memory.store(self._rollsensor_addr, rollsensor_delta, endness=self.project.arch.memory_endness)
+        return [rollsensor_delta]
+
     def _advance_rollsensor(self, state: 'SimState', delta) -> None:
         self._rollsensor = claripy.BVS('rollsensor', 4*self.project.arch.byte_width)
         state.memory.store(self._rollsensor_addr, self._rollsensor, endness=self.project.arch.memory_endness)
@@ -1187,8 +1256,8 @@ class StateGraphRecoveryAnalysis(Analysis):
 
         while simgr.active:
             s = simgr.active[0]
-            print(simgr.active)
-            print(s.memory.load(self._time_addr, 4, endness=self.project.arch.memory_endness))
+            # print(simgr.active)
+            # print(s.memory.load(self._time_addr, 4, endness=self.project.arch.memory_endness))
             # print(s.solver.constraints[-10:])
 
             if not discover:    # ignore multiple states when discovering deltas
@@ -1218,9 +1287,10 @@ class StateGraphRecoveryAnalysis(Analysis):
                 print("ABANDON!")
             if s.addr == 0x47e70d:
                 print("finish recovery!")
-            if s.addr == 0x47e312:
-                print("check time")
-                import ipdb; ipdb.set_trace()
+                # import ipdb; ipdb.set_trace()
+            # if s.addr == 0x47e312 or s.addr == 0x47e2ff:
+            #     print("check time")
+            #     import ipdb; ipdb.set_trace()
 
             # import ipdb; ipdb.set_trace()
 
