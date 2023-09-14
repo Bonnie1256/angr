@@ -1369,10 +1369,13 @@ class StateGraphRecoveryAnalysis(Analysis):
 
         simgr = self.project.factory.simgr(state, save_unsat=unsat_flag)
 
+        # import ipdb; ipdb.set_trace()
         while simgr.active:
             s = simgr.active[0]
-            # print(simgr.active)
-            # print(s.memory.load(self._time_addr, 4, endness=self.project.arch.memory_endness))
+            # print(f"{simgr.active},  {hex(simgr.active[0].addr - 0x0000555555554000)}")
+            # print(f"{simgr.active}")
+            # if len(s.callstack) == 1:
+            #     print(f"{s.regs.rbp-0x1c}    {s.memory.load(s.regs.rbp-0x1c, 4, endness=self.project.arch.memory_endness)}")
             # print(s.solver.constraints[-10:])
 
             if not discover:    # ignore multiple states when discovering deltas
@@ -1388,6 +1391,7 @@ class StateGraphRecoveryAnalysis(Analysis):
             #     print("check flip angle in roll")
             #     import ipdb; ipdb.set_trace()
 
+            # Copter modeflip
             if s.addr == 0x47e336:
                 print("START!")
             if s.addr == 0x47e3e4:
@@ -1402,6 +1406,21 @@ class StateGraphRecoveryAnalysis(Analysis):
                 print("ABANDON!")
             if s.addr == 0x47e70d:
                 print("finish recovery!")
+
+            # # Copter Mode alt_hold
+            # if s.addr == 0x476af5:
+            #     print("AltHold_MotorStopped")
+            # if s.addr == 0x476b3c:
+            #     print("AltHold_Landed_Ground_Idle")
+            # if s.addr == 0x476b54:
+            #     print("AltHold_Landed_Pre_Takeoff")
+            # if s.addr == 0x476b83:
+            #     print("AltHold_Takeoff")
+            # if s.addr == 0x476c04:
+            #     print("AltHold_Flying")
+            #
+            # if s.addr == 0x476ac3:
+            #     print("after get_at_hold_state")
                 # import ipdb; ipdb.set_trace()
             # if s.addr == 0x47e312 or s.addr == 0x47e2ff:
             #     print("check time")
@@ -1425,8 +1444,11 @@ class StateGraphRecoveryAnalysis(Analysis):
         if init_state is not None:
             s = init_state.copy()
             s.ip = self.func.addr
+            # s.ip = self.func
             # TODO: pass object address to StateGraphRecovery as arguments
             s.regs.rdi = 0x8f9b88    # mode_flip_addr
+            # s.regs.rdi = 0x8f9400       # mode_althold_addr
+            # s.regs.rdi = 0x555555a58400 # mode_althold_addr in arducopter_1
         else:
             s = self.project.factory.blank_state(addr=self.func.addr)
             s.regs.rdi = 0xc0000000
