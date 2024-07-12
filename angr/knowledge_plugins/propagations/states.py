@@ -277,6 +277,7 @@ class PropagatorState:
             return False
 
         replaced = False
+        # import ipdb; ipdb.set_trace()
         if self._only_consts:
             if self._is_const(new) or self.is_top(new):
                 self._replacements[codeloc][old] = new
@@ -388,6 +389,7 @@ class PropagatorVEXState(PropagatorState):
         max_prop_expr_occurrence: int = 1,
         model=None,
         artificial_reg_offsets=None,
+        reg_values=None
     ):
         super().__init__(
             arch,
@@ -436,6 +438,7 @@ class PropagatorVEXState(PropagatorState):
         max_prop_expr_occurrence=None,
         initial_codeloc=None,
         model=None,
+        reg_values=None
     ):
         state = cls(
             project.arch,
@@ -447,6 +450,7 @@ class PropagatorVEXState(PropagatorState):
             gp=gp,
             max_prop_expr_occurrence=max_prop_expr_occurrence,
             model=model,
+            reg_values=reg_values
         )
         spoffset_var = SimEngineLight.sp_offset(project.arch.bits, 0)
         state.store_register(
@@ -474,6 +478,13 @@ class PropagatorVEXState(PropagatorState):
                 project.arch.registers["fpscr"][1],
                 claripy.BVV(0, 32),
             )
+        elif reg_values:
+            for reg, value in reg_values.items():
+                state.store_register(
+                    project.arch.registers[reg][0],
+                    project.arch.registers[reg][1],
+                    claripy.BVV(value, project.arch.registers[reg][1] * 8)
+                )
         return state
 
     def copy(self) -> "PropagatorVEXState":
