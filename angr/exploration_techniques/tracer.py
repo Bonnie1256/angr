@@ -24,11 +24,14 @@ class TracingMode:
                         to input that will later be used in exploit generation. But, it might work magically sometimes.
     :ivar CatchDesync:  CatchDesync mode, catch desync because of sim_procedures. It might be a sign of something
                         interesting.
+    :ivar ForcePath:    ForcePath mode, force the path to follow the trace. When the path deviates from the trace,
+                        or there is no more successors, force the path to follow the trace.
     """
 
     Strict = "strict"
     Permissive = "permissive"
     CatchDesync = "catch_desync"
+    ForcePath = "force_path"
 
 
 class TracerDesyncError(AngrTracerError):
@@ -192,8 +195,10 @@ class Tracer(ExplorationTechnique):
         self._no_follow = self._trace is None
 
         # Keep track of count of termination point
-        self._last_block_total_count = self._trace.count(self._trace[-1])
+        self._last_block_total_count = self._trace.count(self._trace[-1]) #Question: what is the point of this, it returns 1 all the time
         self._last_block_seen_count = 0
+
+        self.all_constraints = []
 
         # sanity check: copy_states must be enabled in Permissive mode since we may need to backtrack from a previous
         # state.
@@ -336,7 +341,7 @@ class Tracer(ExplorationTechnique):
     def filter(self, simgr, state, **kwargs):
         # check completion
         if state.globals["trace_idx"] >= len(self._trace) - 1:
-            # if the the state is a desync state and the user wants to keep it,
+            # if the state is a desync state and the user wants to keep it,
             # then do what the user wants
             if self._mode == TracingMode.CatchDesync and self.project.is_hooked(state.addr):
                 return "desync"
@@ -356,6 +361,10 @@ class Tracer(ExplorationTechnique):
         return simgr.step(stash=stash, syscall_data=self._syscall_data, fd_bytes=self._fd_bytes, **kwargs)
 
     def step_state(self, simgr, state, **kwargs):
+        # import ipdb; ipdb.set_trace()
+        print(state, hex(state.addr-0x0000555555554000))
+        print(self.all_constraints)
+        print(state.globals["trace_idx"], len(self._trace), self._trace[state.globals["trace_idx"]], state.globals["sync_idx"])
         if state.history.jumpkind == "Ijk_Exit":
             return {"traced": [state]}
 
@@ -394,6 +403,13 @@ class Tracer(ExplorationTechnique):
             stops = set(kwargs.pop("extra_stop_points", ())) | {self._trace[-1]}
             last_block_details = None
 
+        if state.addr == 0x5555556ce6eb:
+            print("here 0x5555556ce6eb")
+            import ipdb; ipdb.set_trace()
+        # if state.addr == 0x5A7FE + 0x0000555555554000:
+        #     print("check delay")
+        #     import ipdb; ipdb.set_trace()
+
         succs_dict = simgr.step_state(state, extra_stop_points=stops, last_block_details=last_block_details, **kwargs)
         if None not in succs_dict and simgr.errored:
             raise simgr.errored[-1].error
@@ -407,6 +423,7 @@ class Tracer(ExplorationTechnique):
                     self._update_state_tracking(sat_succs[0])
                 except TracerDesyncError as ex:
                     if self._mode == TracingMode.Permissive:
+                        print("Forcing resync")
                         succs_dict = self._force_resync(simgr, state, ex.deviating_trace_idx, ex.deviating_addr, kwargs)
                     else:
                         raise
@@ -420,8 +437,23 @@ class Tracer(ExplorationTechnique):
             # Check all states for correct successor
             if len(succs) == 1:
                 self._update_state_tracking(succs[0])
+                # if self._compare_addr(succs[0].addr, self._trace[state.globals["trace_idx"]+1]):
+                #     self._update_state_tracking(succs[0])
+                # else:
+                #     if succs[0].history.jumpkind == "Ijk_Call":
+                #         succs_dict[None] = self._force_follow_trace(succs_dict, state)
+                #         import ipdb; ipdb.set_trace()
+
+
+                if len(succs_dict[None]) == 0:
+                    print("unsat")
+                    succs_dict[None] = succs
             elif len(succs) == 0:
-                raise Exception("All states disappeared!")
+                if self._mode == TracingMode.ForcePath:
+                    print("ForcePath", succs_dict)
+                    succs_dict[None] = self._force_follow_trace(succs_dict, state)
+                else:
+                    raise Exception("All states disappeared!")
             else:
                 succ = self._pick_correct_successor(succs)
                 succs_dict[None] = [succ]
@@ -432,6 +464,12 @@ class Tracer(ExplorationTechnique):
         if succs_dict[None][0].globals["is_desync"]:
             simgr.active[0].globals["trace_idx"] = len(self._trace)
             succs_dict[None][0] = state
+
+        # if mode is ForcePath, backup the constraints and clear them
+        if self._mode == TracingMode.ForcePath:
+            self.all_constraints += succs_dict[None][0].solver.constraints
+            succs_dict[None][0].solver.constraints.clear()
+
         return succs_dict
 
     def _force_resync(self, simgr, state, deviating_trace_idx, deviating_addr, kwargs):
@@ -491,7 +529,47 @@ class Tracer(ExplorationTechnique):
 
         return succs_dict
 
+    def _force_follow_trace(self, succs_dict:dict, pre_state: "SimState"):
+        """
+        When there is no successors, force the path to follow the trace by setting ip to the next address in the trace.
+        When successor is call, do simliar
+        """
+        succs = succs_dict[None] + succs_dict["unsat"]
+        idx = pre_state.globals["trace_idx"]
+        new_addr = self._trace[idx + 1]
+        if len(succs) == 0:
+            # indirect call with no successor
+            if len(succs_dict["unconstrained"]) > 0:
+
+                # import ipdb; ipdb.set_trace()
+                curr_state = succs_dict["unconstrained"][0]
+
+                # make sure it is an indirect call
+                if curr_state.history.jumpkind != "Ijk_Call":
+                    return []
+
+                # make sure the return address is in the trace
+                if curr_state.stack_read(0, self.project.arch.bytes).concrete_value != new_addr:
+                    return []
+
+        elif len(succs) == 1:
+            curr_state = succs[0]
+            if curr_state.history.jumpkind == "Ijk_Call":
+                import ipdb; ipdb.set_trace()
+                # make sure the return address is in the trace
+                if curr_state.stack_read(0, self.project.arch.bytes).concrete_value != new_addr:
+                    self._update_state_tracking(curr_state)
+                    return succs
+
+        new_state = curr_state.copy()
+        new_state.stack_pop()
+        new_state._ip = new_addr
+        self._update_state_tracking(new_state)
+        return [new_state]
+
+
     def _pick_correct_successor(self, succs):
+        # import ipdb; ipdb.set_trace()
         # there's been a branch of some sort. Try to identify which state stayed on the trace.
         assert len(succs) > 0
         idx = succs[0].globals["trace_idx"]
@@ -513,7 +591,19 @@ class Tracer(ExplorationTechnique):
                     pass
 
         if not res:
-            raise Exception("No states followed the trace?")
+            if self._mode == TracingMode.ForcePath:
+                # in cfg there are two basic blocks but no jump, but simgr does not split the state
+                # check if the next block in trace is part of the current block
+                if self._trace[idx] < self._trace[idx + 1] < self._trace[idx + 2]:
+                    # FIXME: if there is a better way to do this check
+                    for succ in succs:
+                        if self._compare_addr(self._trace[idx + 2], succ.addr):
+                            res.append(succ)
+                    if not res:
+                        # none of the successors are in the trace
+                        import ipdb; ipdb.set_trace()
+            else:
+                raise Exception("No states followed the trace?")
 
         if len(res) > 1:
             raise Exception("The state split but several successors have the same (correct) address?")
@@ -527,7 +617,7 @@ class Tracer(ExplorationTechnique):
         timer = state.globals["sync_timer"]
 
         self._last_block_seen_count += state.history.recent_bbl_addrs.count(self._trace[-1])
-
+        print(state.history.recent_block_count)
         if state.history.recent_block_count > 1:
             # multiple blocks were executed this step. they should follow the trace *perfectly*
             # or else something is up
@@ -601,6 +691,9 @@ class Tracer(ExplorationTechnique):
         elif self._compare_addr(self._trace[idx + 1], state.addr):
             # normal case
             state.globals["trace_idx"] = idx + 1
+        elif self._compare_addr(self._trace[idx + 2], state.addr):
+            # in cfg there are two basic blocks but no jump, but simgr does not split the state
+            state.globals["trace_idx"] = idx + 2
         elif self.project.loader._extern_object is not None and self.project.loader.extern_object.contains_addr(
             state.addr
         ):
@@ -650,6 +743,7 @@ class Tracer(ExplorationTechnique):
                 raise AngrTracerError("Could not synchronize at ifunc return address")
         elif self._analyze_misfollow(state, idx):
             # misfollow analysis will set a sync point somewhere if it succeeds
+            import ipdb; ipdb.set_trace()
             pass
         else:
             raise TracerDesyncError(
