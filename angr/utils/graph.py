@@ -1,4 +1,6 @@
-from collections import defaultdict
+from __future__ import annotations
+from typing import Any
+from collections import defaultdict, OrderedDict
 import logging
 
 import networkx
@@ -183,10 +185,7 @@ def dominates(idom, dominator_node, node):
     while n:
         if n == dominator_node:
             return True
-        if n in idom and n != idom[n]:
-            n = idom[n]
-        else:
-            n = None
+        n = idom[n] if n in idom and n != idom[n] else None
     return False
 
 
@@ -256,12 +255,10 @@ class TemporaryNode:
         self._label = label
 
     def __repr__(self):
-        return "TN[%s]" % self._label
+        return f"TN[{self._label}]"
 
     def __eq__(self, other):
-        if isinstance(other, TemporaryNode) and other._label == self._label:
-            return True
-        return False
+        return bool(isinstance(other, TemporaryNode) and other._label == self._label)
 
     def __hash__(self):
         return hash(("TemporaryNode", self._label))
@@ -294,7 +291,7 @@ class ContainerNode:
         return hash(("CN", self._obj))
 
     def __repr__(self):
-        return "CN[%s]" % repr(self._obj)
+        return f"CN[{self._obj!r}]"
 
 
 class Dominators:
@@ -324,7 +321,7 @@ class Dominators:
     def _graph_successors(self, graph, node):
         """
         Return the successors of a node in the graph.
-        This method can be overriden in case there are special requirements with the graph and the successors. For
+        This method can be overridden in case there are special requirements with the graph and the successors. For
         example, when we are dealing with a control flow graph, we may not want to get the FakeRet successors.
 
         :param graph: The graph.
@@ -519,9 +516,8 @@ class Dominators:
     def _pd_eval(self, v):
         if self._ancestor[v.index] is None:
             return v
-        else:
-            self._pd_compress(v)
-            return self._label[v.index]
+        self._pd_compress(v)
+        return self._label[v.index]
 
     def _pd_compress(self, v):
         if self._ancestor[self._ancestor[v.index].index] is not None:
@@ -595,8 +591,7 @@ class GraphUtils:
 
         ordered_merge_points = GraphUtils.quasi_topological_sort_nodes(graph, merge_points)
 
-        addrs = [n.addr for n in ordered_merge_points]
-        return addrs
+        return [n.addr for n in ordered_merge_points]
 
     @staticmethod
     def find_widening_points(function_addr, function_endpoints, graph):  # pylint: disable=unused-argument
@@ -701,7 +696,7 @@ class GraphUtils:
             return src_addr + dst_addr
 
         # collapse all strongly connected components
-        edges = sorted(list(graph.edges()), key=_sort_edge)
+        edges = sorted(graph.edges(), key=_sort_edge)
         for src, dst in edges:
             scc_index = GraphUtils._components_index_node(sccs, src)
             if scc_index is not None:
@@ -741,8 +736,7 @@ class GraphUtils:
             return ordered_nodes
 
         nodes = set(nodes)
-        ordered_nodes = [n for n in ordered_nodes if n in nodes]
-        return ordered_nodes
+        return [n for n in ordered_nodes if n in nodes]
 
     @staticmethod
     def _components_index_node(components, node):
@@ -820,3 +814,42 @@ class GraphUtils:
                                 break
 
         ordered_nodes.extend(GraphUtils.quasi_topological_sort_nodes(subgraph))
+
+    @staticmethod
+    def loop_nesting_forest(graph: networkx.DiGraph, start_node) -> OrderedDict[Any, networkx.DiGraph]:
+        """
+        Generates the loop-nesting forest for the provided directional graph. This is *not* the algorithm proposed by
+        Ramalingam.
+
+        :param graph:       the graph to generate the loop-nesting forest for.
+        :param start_node:  the node to start traversing the graph from.
+        :return:            An ordered dict of loop heads to their corresponding loop nodes.
+        """
+
+        # TODO: Should we replace this function using dfs_back_edges()?
+
+        loop_head_to_loop_nodes = OrderedDict()
+
+        graph_copy = networkx.DiGraph(graph)
+
+        while True:
+            cycles_iter = networkx.simple_cycles(graph_copy)
+            try:
+                cycle = next(cycles_iter)
+            except StopIteration:
+                break
+
+            loop_backedge = (None, None)
+
+            for n in networkx.dfs_preorder_nodes(graph_copy, source=start_node):
+                if n in cycle:
+                    idx = cycle.index(n)
+                    loop_backedge = (cycle[-1], cycle[idx]) if idx == 0 else (cycle[idx - 1], cycle[idx])
+                    break
+
+            loop_head = loop_backedge[1]
+            loop_head_to_loop_nodes[loop_head] = networkx.DiGraph(graph_copy.subgraph(cycle))
+
+            graph_copy.remove_edge(*loop_backedge)
+
+        return loop_head_to_loop_nodes

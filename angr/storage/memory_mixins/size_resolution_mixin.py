@@ -1,4 +1,7 @@
+from __future__ import annotations
 import logging
+
+import claripy
 
 from . import MemoryMixin
 from ...errors import SimMemoryLimitError, SimMemoryError, SimUnsatError
@@ -18,7 +21,7 @@ class SizeNormalizationMixin(MemoryMixin):
     def load(self, addr, size=None, **kwargs):
         if size is None:
             raise TypeError("Must provide size to load")
-        elif type(size) is int:
+        if type(size) is int:
             out_size = size
         elif getattr(size, "op", None) == "BVV":
             out_size = size.args[0]
@@ -110,9 +113,9 @@ class SizeConcretizationMixin(MemoryMixin):
                 conc_sizes = list(
                     self.state.solver.eval_upto(size, self._max_concretize_count, extra_constraints=(size <= max_size,))
                 )
-        except SimUnsatError:
+        except SimUnsatError as err:
             # size has to be greater than max_size
-            raise SimMemoryError("Not enough data for store")
+            raise SimMemoryError("Not enough data for store") from err
 
         # filter out all concrete sizes that are greater than max_size
         # Note that the VSA solver (used in static mode) cannot precisely handle extra constraints. As a result, we may
@@ -133,7 +136,7 @@ class SizeConcretizationMixin(MemoryMixin):
             conc_sizes = [min(cs, self._max_symbolic_size) for cs in conc_sizes]
 
         if condition is None:
-            condition = self.state.solver.true
+            condition = claripy.true()
         for conc_size in conc_sizes:
             if conc_size == 0:
                 continue

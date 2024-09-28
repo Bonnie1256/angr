@@ -1,3 +1,4 @@
+from __future__ import annotations
 import claripy
 
 from . import MemoryMixin
@@ -98,7 +99,7 @@ class SmartFindMixin(MemoryMixin):
         able to handle wide characters
         """
         if condition is None:
-            condition = self.state.solver.true
+            condition = claripy.true()
         chunk = None
         chunk_progress = chunk_size
 
@@ -138,7 +139,7 @@ class SmartFindMixin(MemoryMixin):
 
     def _find_condition(self, target_addr):  # pylint:disable=unused-argument,no-self-use
         # TODO: fill this in in order to make each load have the correct condition associated with it
-        return claripy.true
+        return claripy.true()
 
     def _find_compare(self, element, target):
         comparison = element == target
@@ -155,5 +156,5 @@ class SmartFindMixin(MemoryMixin):
             default = claripy.BVV(0, self.state.arch.bits)
         if cases and cases[-1][0].is_true():
             default = cases.pop(-1)[1]
-        result = self.state.solver.ite_cases(cases, default)
+        result = claripy.ite_cases(cases, default)
         return result, constraints, match_indices

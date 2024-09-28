@@ -1,3 +1,4 @@
+from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
@@ -5,6 +6,7 @@ from ailment import Block
 from ailment.statement import Call, Statement, ConditionalJump, Assignment, Store, Return, Jump
 from ailment.expression import (
     Load,
+    VirtualVariable,
     Expression,
     BinaryOp,
     UnaryOp,
@@ -191,6 +193,15 @@ class BlockIOFinder(AILBlockWalkerBase):
         self._add_or_update_dict(self.derefed_at, stmt_idx, load_loc)
         return load_loc
 
+    def _handle_VirtualVariable(
+        self, expr_idx: int, expr: VirtualVariable, stmt_idx: int, stmt: Statement, block: Block | None, is_memory=True
+    ):
+        if expr.was_stack:
+            load_loc = MemoryLocation(SpOffset(self._project.arch.bits, expr.stack_offset), expr.bits)
+            self._add_or_update_dict(self.derefed_at, stmt_idx, load_loc)
+            return load_loc
+        return None
+
     def _handle_CallExpr(
         self, expr_idx: int, expr: Call, stmt_idx: int, stmt: Statement, block: Block | None, is_memory=False
     ):
@@ -253,8 +264,7 @@ class BlockIOFinder(AILBlockWalkerBase):
     ):
         if self._as_atom:
             return None
-        else:
-            return expr
+        return expr
 
     # pylint: disable=unused-argument
     def _handle_Register(
@@ -262,8 +272,7 @@ class BlockIOFinder(AILBlockWalkerBase):
     ):
         if self._as_atom:
             return Register(expr.reg_offset, expr.size)
-        else:
-            return expr
+        return expr
 
     def _handle_Const(
         self, expr_idx: int, expr: Const, stmt_idx: int, stmt: Statement, block: Block | None, is_memory=False

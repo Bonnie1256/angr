@@ -1,3 +1,4 @@
+from __future__ import annotations
 import angr
 import claripy
 
@@ -12,4 +13,4 @@ class _vsyscall(angr.SimProcedure):
         else:
             ret_addr = self.state.registers.load(self.state.arch.lr_offset, self.state.arch.bytes)
 
-        self.successors.add_successor(self.state, ret_addr, claripy.true, "Ijk_Sys")
+        self.successors.add_successor(self.state, ret_addr, claripy.true(), "Ijk_Sys")

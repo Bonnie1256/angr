@@ -1,3 +1,4 @@
+from __future__ import annotations
 import logging
 
 from archinfo import ArchPcode
@@ -10,6 +11,7 @@ from ...calling_conventions import (
     register_default_cc,
     SimCCUnknown,
     default_cc,
+    SimCCO32,
 )
 
 
@@ -107,6 +109,7 @@ def register_pcode_arch_default_cc(arch: ArchPcode):
             "PowerPC:BE:32:e200": SimCCPowerPC,
             "PowerPC:BE:32:MPC8270": SimCCPowerPC,
             "Xtensa:LE:32:default": SimCCXtensa,
+            "MIPS:LE:32:default": SimCCO32,
         }
         if arch.name in manual_cc_mapping:
             # first attempt: manually specified mappings

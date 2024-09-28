@@ -1,3 +1,4 @@
+from __future__ import annotations
 import logging
 import claripy
 
@@ -19,12 +20,12 @@ def ast_weight(ast, memo=None):
     if memo is None:
         memo = {}
 
-    result = memo.get(ast.cache_key, None)
+    result = memo.get(ast.hash(), None)
     if result is not None:
         return result
 
     result = 1 + sum(ast_weight(arg, memo) for arg in ast.args)
-    memo[ast.cache_key] = result
+    memo[ast.hash()] = result
     return result
 
 
@@ -68,11 +69,11 @@ class Suggestions(ExplorationTechnique):
         if event.objects["type"] is claripy.errors.ClaripySolverInterruptError:
             if event.objects["reason"][0] == "timeout":
                 limit_number = state.solver._solver.timeout
-                limit_kind = "hit a solver timeout of %s ms." % limit_number
+                limit_kind = f"hit a solver timeout of {limit_number} ms."
                 limit_minimum = 60 * 1000
             elif event.objects["reason"][0] == "max. memory exceeded":
                 limit_number = state.solver._solver.max_memory
-                limit_kind = "hit a solver memory limit of %s MB." % limit_number
+                limit_kind = f"hit a solver memory limit of {limit_number} MB."
                 limit_minimum = 1024
             else:
                 limit_number = None

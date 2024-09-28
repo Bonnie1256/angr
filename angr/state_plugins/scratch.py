@@ -1,3 +1,4 @@
+from __future__ import annotations
 import logging
 
 import claripy
@@ -29,7 +30,7 @@ class SimStateScratch(SimStatePlugin):
 
         # information on exits *from* this state
         self.jumpkind = None
-        self.guard = claripy.true
+        self.guard = claripy.true()
         self.target = None
         self.source = None
         self.exit_stmt_idx = None
@@ -75,7 +76,7 @@ class SimStateScratch(SimStatePlugin):
 
             self.statement_offset = scratch.statement_offset
 
-        # priveleges
+        # privileges
         self._priv_stack = [False]
 
     @property
@@ -109,13 +110,13 @@ class SimStateScratch(SimStatePlugin):
                 raise SimMissingTempError(
                     "VEX temp variable %d does not exist. This is usually the result of an incorrect slicing." % tmp
                 )
-        except IndexError:
-            raise SimMissingTempError("Accessing a temp that is illegal in this tyenv")
+        except IndexError as err:
+            raise SimMissingTempError("Accessing a temp that is illegal in this tyenv") from err
         self.state._inspect("tmp_read", BP_AFTER, tmp_read_expr=v)
         return v
 
     # pylint:disable=unused-argument
-    def store_tmp(self, tmp, content, reg_deps=None, tmp_deps=None, deps=None, **kwargs):
+    def store_tmp(self, tmp, content, reg_deps=frozenset(), tmp_deps=frozenset(), deps=None, **kwargs):
         """
         Stores a Claripy expression in a VEX temp value.
         If in symbolic mode, this involves adding a constraint for the tmp's symbolic variable.

@@ -1,10 +1,11 @@
 # pylint:disable=unused-argument
+from __future__ import annotations
 
 import ailment
 
 from .sequence_walker import SequenceWalker
 from .structuring.structurer_nodes import SequenceNode
-from .utils import first_nonlabel_statement
+from .utils import first_nonlabel_nonphi_statement
 
 
 class RedundantLabelRemover:
@@ -86,15 +87,16 @@ class RedundantLabelRemover:
             # fixed point remove all labels with no edges in
             while True:
                 for idx, stmt in enumerate(block.statements):
-                    if isinstance(stmt, ailment.Stmt.Label):
-                        if (stmt.ins_addr, stmt.block_idx) not in self._jump_targets or stmt in self._labels_to_remove:
-                            # useless label - update the block in-place
-                            block.statements = block.statements[:idx] + block.statements[idx + 1 :]
-                            break
+                    if isinstance(stmt, ailment.Stmt.Label) and (
+                        (stmt.ins_addr, stmt.block_idx) not in self._jump_targets or stmt in self._labels_to_remove
+                    ):
+                        # useless label - update the block in-place
+                        block.statements = block.statements[:idx] + block.statements[idx + 1 :]
+                        break
                 else:
                     break
 
-            first_stmt = first_nonlabel_statement(block)
+            first_stmt = first_nonlabel_nonphi_statement(block)
             if isinstance(first_stmt, ailment.Stmt.ConditionalJump):
                 if isinstance(first_stmt.true_target, ailment.Expr.Const):
                     tpl = first_stmt.true_target.value, None
@@ -119,15 +121,14 @@ class RedundantLabelRemover:
 
             if block.statements:
                 last_stmt = block.statements[-1]
-                if isinstance(last_stmt, ailment.Stmt.Jump):
-                    if isinstance(last_stmt.target, ailment.Expr.Const):
-                        tpl = last_stmt.target.value, last_stmt.target_idx
-                        if tpl in self._new_jump_target:
-                            last_stmt.target = ailment.Expr.Const(
-                                last_stmt.target.idx,
-                                last_stmt.target.variable,
-                                self._new_jump_target[tpl][0],
-                                last_stmt.target.bits,
-                                **last_stmt.target.tags,
-                            )
-                            last_stmt.target_idx = self._new_jump_target[tpl][1]
+                if isinstance(last_stmt, ailment.Stmt.Jump) and isinstance(last_stmt.target, ailment.Expr.Const):
+                    tpl = last_stmt.target.value, last_stmt.target_idx
+                    if tpl in self._new_jump_target:
+                        last_stmt.target = ailment.Expr.Const(
+                            last_stmt.target.idx,
+                            last_stmt.target.variable,
+                            self._new_jump_target[tpl][0],
+                            last_stmt.target.bits,
+                            **last_stmt.target.tags,
+                        )
+                        last_stmt.target_idx = self._new_jump_target[tpl][1]

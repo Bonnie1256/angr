@@ -1,4 +1,5 @@
-from typing import DefaultDict, TYPE_CHECKING
+from __future__ import annotations
+from typing import TYPE_CHECKING
 from collections import defaultdict, OrderedDict
 import logging
 
@@ -9,9 +10,9 @@ from ailment.statement import ConditionalJump, Label, Assignment, Jump
 from ailment.expression import Expression, BinaryOp, Const, Load
 
 from angr.utils.graph import GraphUtils
-from ..utils import first_nonlabel_statement, remove_last_statement
+from ..utils import first_nonlabel_nonphi_statement, remove_last_statement
 from ..structuring.structurer_nodes import IncompleteSwitchCaseHeadStatement, SequenceNode, MultiNode
-from .optimization_pass import OptimizationPassStage, MultipleBlocksException, StructuringOptimizationPass
+from .optimization_pass import MultipleBlocksException, StructuringOptimizationPass
 from ..region_simplifiers.switch_cluster_simplifier import SwitchClusterFinder
 
 if TYPE_CHECKING:
@@ -60,7 +61,7 @@ class Case:
         if self.value == "default":
             return f"Case default@{self.target:#x}{'' if self.target_idx is None else '.' + str(self.target_idx)}"
         return (
-            f"Case {repr(self.original_node)}@{self.target:#x}"
+            f"Case {self.original_node!r}@{self.target:#x}"
             f"{'' if self.target_idx is None else '.' + str(self.target_idx)}: {self.expr} == {self.value}"
         )
 
@@ -119,14 +120,14 @@ class StableVarExprHasher(AILBlockWalkerBase):
         self._hash_lst.append(expr.op)
         super()._handle_BinaryOp(expr_idx, expr, stmt_idx, stmt, block)
 
-    def _handle_UnaryOp(self, expr_idx: int, expr: "UnaryOp", stmt_idx: int, stmt, block: Block | None):
+    def _handle_UnaryOp(self, expr_idx: int, expr: UnaryOp, stmt_idx: int, stmt, block: Block | None):
         self._hash_lst.append(expr.op)
         super()._handle_UnaryOp(expr_idx, expr, stmt_idx, stmt, block)
 
     def _handle_Const(self, expr_idx: int, expr: Const, stmt_idx: int, stmt, block: Block | None):
         self._hash_lst.append((expr.value, expr.bits))
 
-    def _handle_Convert(self, expr_idx: int, expr: "Convert", stmt_idx: int, stmt, block: Block | None):
+    def _handle_Convert(self, expr_idx: int, expr: Convert, stmt_idx: int, stmt, block: Block | None):
         self._hash_lst.append(expr.to_bits)
         super()._handle_Convert(expr_idx, expr, stmt_idx, stmt, block)
 
@@ -143,14 +144,13 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
     As a hack for now, we only run this deoptimization on Linux binaries.
     """
 
+    # TODO: this needs to be updated to support Windows, but detect and disable on MSVC
     PLATFORMS = ["linux"]
-    STAGE = OptimizationPassStage.DURING_REGION_IDENTIFICATION
     NAME = "Convert lowered switch-cases (if-else) to switch-cases"
     DESCRIPTION = (
         "Convert lowered switch-cases (if-else) to switch-cases. Only works when the Phoenix structuring "
         "algorithm is in use."
     )
-    STRUCTURING = ["phoenix"]
 
     def __init__(self, func, min_distinct_cases=2, **kwargs):
         super().__init__(
@@ -194,8 +194,7 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
                 current_len = 1
 
         # Final check to include the last sequence
-        max_len = max(max_len, current_len)
-        return max_len
+        return max(max_len, current_len)
 
     @staticmethod
     def _count_distinct_cases(cases: list[Case]) -> int:
@@ -370,18 +369,18 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
         for node in sorted_nodes:
             r = self._find_switch_variable_comparison_type_a(node)
             if r is not None:
-                variable_comparisons[node] = ("a",) + r
+                variable_comparisons[node] = ("a", *r)
                 continue
             r = self._find_switch_variable_comparison_type_b(node)
             if r is not None:
-                variable_comparisons[node] = ("b",) + r
+                variable_comparisons[node] = ("b", *r)
                 continue
             r = self._find_switch_variable_comparison_type_c(node)
             if r is not None:
-                variable_comparisons[node] = ("c",) + r
+                variable_comparisons[node] = ("c", *r)
                 continue
 
-        varhash_to_caselists: DefaultDict[int, list[tuple[list[Case], list]]] = defaultdict(list)
+        varhash_to_caselists: defaultdict[int, list[tuple[list[Case], list]]] = defaultdict(list)
         used_nodes = set()
 
         for head in variable_comparisons:
@@ -406,10 +405,7 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
                     next_addr,
                     next_addr_idx,
                 ) = variable_comparisons[comp]
-                if cases:
-                    last_varhash = cases[-1].variable_hash
-                else:
-                    last_varhash = None
+                last_varhash = cases[-1].variable_hash if cases else None
 
                 if op == "eq":
                     # eq always indicates a new case
@@ -424,20 +420,18 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
                         if value in {0xFFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF}:
                             break
 
-                        if comp is not head:
-                            # non-head node has at most one predecessor
-                            if self._graph.in_degree[comp] > 1:
-                                break
+                        # non-head node has at most one predecessor
+                        if comp is not head and self._graph.in_degree[comp] > 1:
+                            break
 
                         cases.append(Case(comp, comp_type, variable_hash, expr, value, target, target_idx, next_addr))
                         used_nodes.add(comp)
                     else:
                         # new variable!
-                        if last_comp is not None:
-                            if comp.addr not in default_case_candidates:
-                                default_case_candidates[comp.addr] = Case(
-                                    last_comp, None, last_varhash, None, "default", comp.addr, comp.idx, None
-                                )
+                        if last_comp is not None and comp.addr not in default_case_candidates:
+                            default_case_candidates[comp.addr] = Case(
+                                last_comp, None, last_varhash, None, "default", comp.addr, comp.idx, None
+                            )
                         break
 
                     successors = [succ for succ in self._graph.successors(comp) if succ is not comp]
@@ -523,11 +517,10 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
                                     default_case_candidates[le_addr] = Case(
                                         comp, None, variable_hash, expr, "default", le_addr, le_idx, None
                                     )
-                            elif not gt_added:
-                                if gt_addr not in default_case_candidates:
-                                    default_case_candidates[gt_addr] = Case(
-                                        comp, None, variable_hash, expr, "default", gt_addr, gt_idx, None
-                                    )
+                            elif not gt_added and gt_addr not in default_case_candidates:
+                                default_case_candidates[gt_addr] = Case(
+                                    comp, None, variable_hash, expr, "default", gt_addr, gt_idx, None
+                                )
                             extra_cmp_nodes.append(comp)
                             used_nodes.add(comp)
                         else:
@@ -609,39 +602,41 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
 
         if isinstance(node, Block) and node.statements:
             stmt = node.statements[-1]
-            if stmt is not None and stmt is not first_nonlabel_statement(node):
-                if (
+            if (
+                stmt is not None
+                and stmt is not first_nonlabel_nonphi_statement(node)
+                and (
                     isinstance(stmt, ConditionalJump)
                     and isinstance(stmt.true_target, Const)
                     and isinstance(stmt.false_target, Const)
-                ):
-                    cond = stmt.condition
-                    if isinstance(cond, BinaryOp):
-                        if isinstance(cond.operands[1], Const):
-                            variable_hash = StableVarExprHasher(cond.operands[0]).hash
-                            value = cond.operands[1].value
-                            if cond.op == "CmpEQ":
-                                target = stmt.true_target.value
-                                target_idx = stmt.true_target_idx
-                                next_node_addr = stmt.false_target.value
-                                next_node_idx = stmt.false_target_idx
-                            elif cond.op == "CmpNE":
-                                target = stmt.false_target.value
-                                target_idx = stmt.false_target_idx
-                                next_node_addr = stmt.true_target.value
-                                next_node_idx = stmt.true_target_idx
-                            else:
-                                return None
-                            return (
-                                variable_hash,
-                                "eq",
-                                cond.operands[0],
-                                value,
-                                target,
-                                target_idx,
-                                next_node_addr,
-                                next_node_idx,
-                            )
+                )
+            ):
+                cond = stmt.condition
+                if isinstance(cond, BinaryOp) and isinstance(cond.operands[1], Const):
+                    variable_hash = StableVarExprHasher(cond.operands[0]).hash
+                    value = cond.operands[1].value
+                    if cond.op == "CmpEQ":
+                        target = stmt.true_target.value
+                        target_idx = stmt.true_target_idx
+                        next_node_addr = stmt.false_target.value
+                        next_node_idx = stmt.false_target_idx
+                    elif cond.op == "CmpNE":
+                        target = stmt.false_target.value
+                        target_idx = stmt.false_target_idx
+                        next_node_addr = stmt.true_target.value
+                        next_node_idx = stmt.true_target_idx
+                    else:
+                        return None
+                    return (
+                        variable_hash,
+                        "eq",
+                        cond.operands[0],
+                        value,
+                        target,
+                        target_idx,
+                        next_node_addr,
+                        next_node_idx,
+                    )
 
         return None
 
@@ -653,40 +648,42 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
         # there is only one non-label statement
 
         if isinstance(node, Block):
-            stmt = first_nonlabel_statement(node)
-            if stmt is not None and stmt is node.statements[-1]:
-                if (
+            stmt = first_nonlabel_nonphi_statement(node)
+            if (
+                stmt is not None
+                and stmt is node.statements[-1]
+                and (
                     isinstance(stmt, ConditionalJump)
                     and isinstance(stmt.true_target, Const)
                     and isinstance(stmt.false_target, Const)
-                ):
-                    cond = stmt.condition
-                    if isinstance(cond, BinaryOp):
-                        if isinstance(cond.operands[1], Const):
-                            variable_hash = StableVarExprHasher(cond.operands[0]).hash
-                            value = cond.operands[1].value
-                            if cond.op == "CmpEQ":
-                                target = stmt.true_target.value
-                                target_idx = stmt.true_target_idx
-                                next_node_addr = stmt.false_target.value
-                                next_node_idx = stmt.false_target_idx
-                            elif cond.op == "CmpNE":
-                                target = stmt.false_target.value
-                                target_idx = stmt.false_target_idx
-                                next_node_addr = stmt.true_target.value
-                                next_node_idx = stmt.true_target_idx
-                            else:
-                                return None
-                            return (
-                                variable_hash,
-                                "eq",
-                                cond.operands[0],
-                                value,
-                                target,
-                                target_idx,
-                                next_node_addr,
-                                next_node_idx,
-                            )
+                )
+            ):
+                cond = stmt.condition
+                if isinstance(cond, BinaryOp) and isinstance(cond.operands[1], Const):
+                    variable_hash = StableVarExprHasher(cond.operands[0]).hash
+                    value = cond.operands[1].value
+                    if cond.op == "CmpEQ":
+                        target = stmt.true_target.value
+                        target_idx = stmt.true_target_idx
+                        next_node_addr = stmt.false_target.value
+                        next_node_idx = stmt.false_target_idx
+                    elif cond.op == "CmpNE":
+                        target = stmt.false_target.value
+                        target_idx = stmt.false_target_idx
+                        next_node_addr = stmt.true_target.value
+                        next_node_idx = stmt.true_target_idx
+                    else:
+                        return None
+                    return (
+                        variable_hash,
+                        "eq",
+                        cond.operands[0],
+                        value,
+                        target,
+                        target_idx,
+                        next_node_addr,
+                        next_node_idx,
+                    )
 
         return None
 
@@ -698,59 +695,61 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
         # there is only one non-label statement
 
         if isinstance(node, Block):
-            stmt = first_nonlabel_statement(node)
-            if stmt is not None and stmt is node.statements[-1]:
-                if (
+            stmt = first_nonlabel_nonphi_statement(node)
+            if (
+                stmt is not None
+                and stmt is node.statements[-1]
+                and (
                     isinstance(stmt, ConditionalJump)
                     and isinstance(stmt.true_target, Const)
                     and isinstance(stmt.false_target, Const)
-                ):
-                    cond = stmt.condition
-                    if isinstance(cond, BinaryOp):
-                        if isinstance(cond.operands[1], Const):
-                            variable_hash = StableVarExprHasher(cond.operands[0]).hash
-                            value = cond.operands[1].value
-                            op = cond.op
-                            if stmt.true_target.value == stmt.false_target.value:
-                                return None
-                            if op == "CmpGT":
-                                op_str = "gt"
-                                gt_node_addr = stmt.true_target.value
-                                gt_node_idx = stmt.true_target_idx
-                                le_node_addr = stmt.false_target.value
-                                le_node_idx = stmt.false_target_idx
-                            elif op == "CmpGE":
-                                op_str = "gt"
-                                value += 1
-                                gt_node_addr = stmt.true_target.value
-                                gt_node_idx = stmt.true_target_idx
-                                le_node_addr = stmt.false_target.value
-                                le_node_idx = stmt.false_target_idx
-                            elif op == "CmpLT":
-                                op_str = "gt"
-                                value -= 1
-                                gt_node_addr = stmt.false_target.value
-                                gt_node_idx = stmt.false_target_idx
-                                le_node_addr = stmt.true_target.value
-                                le_node_idx = stmt.true_target_idx
-                            elif op == "CmpLE":
-                                op_str = "gt"
-                                gt_node_addr = stmt.false_target.value
-                                gt_node_idx = stmt.false_target_idx
-                                le_node_addr = stmt.true_target.value
-                                le_node_idx = stmt.true_target_idx
-                            else:
-                                return None
-                            return (
-                                variable_hash,
-                                op_str,
-                                cond.operands[0],
-                                value,
-                                gt_node_addr,
-                                gt_node_idx,
-                                le_node_addr,
-                                le_node_idx,
-                            )
+                )
+            ):
+                cond = stmt.condition
+                if isinstance(cond, BinaryOp) and isinstance(cond.operands[1], Const):
+                    variable_hash = StableVarExprHasher(cond.operands[0]).hash
+                    value = cond.operands[1].value
+                    op = cond.op
+                    if stmt.true_target.value == stmt.false_target.value:
+                        return None
+                    if op == "CmpGT":
+                        op_str = "gt"
+                        gt_node_addr = stmt.true_target.value
+                        gt_node_idx = stmt.true_target_idx
+                        le_node_addr = stmt.false_target.value
+                        le_node_idx = stmt.false_target_idx
+                    elif op == "CmpGE":
+                        op_str = "gt"
+                        value += 1
+                        gt_node_addr = stmt.true_target.value
+                        gt_node_idx = stmt.true_target_idx
+                        le_node_addr = stmt.false_target.value
+                        le_node_idx = stmt.false_target_idx
+                    elif op == "CmpLT":
+                        op_str = "gt"
+                        value -= 1
+                        gt_node_addr = stmt.false_target.value
+                        gt_node_idx = stmt.false_target_idx
+                        le_node_addr = stmt.true_target.value
+                        le_node_idx = stmt.true_target_idx
+                    elif op == "CmpLE":
+                        op_str = "gt"
+                        gt_node_addr = stmt.false_target.value
+                        gt_node_idx = stmt.false_target_idx
+                        le_node_addr = stmt.true_target.value
+                        le_node_idx = stmt.true_target_idx
+                    else:
+                        return None
+                    return (
+                        variable_hash,
+                        op_str,
+                        cond.operands[0],
+                        value,
+                        gt_node_addr,
+                        gt_node_idx,
+                        le_node_addr,
+                        le_node_idx,
+                    )
 
         return None
 
@@ -785,7 +784,7 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
             onode, value, target, target_idx, next_node_addr = ca_others[next_node_addr]
             onode: Block
 
-            if first_nonlabel_statement(onode) is not onode.statements[-1]:
+            if first_nonlabel_nonphi_statement(onode) is not onode.statements[-1]:
                 onode = onode.copy(statements=[onode.statements[-1]])
 
             graph.add_edge(last_node, onode)
@@ -838,7 +837,4 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
 
         if len(cases_0) > len(cases_1):
             return False
-        for case in cases_0:
-            if case not in cases_1:
-                return False
-        return True
+        return all(case in cases_1 for case in cases_0)

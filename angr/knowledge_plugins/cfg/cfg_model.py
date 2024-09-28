@@ -102,9 +102,7 @@ class CFGModel(Serializable):
     #
 
     def __getstate__(self):
-        state = dict(map(lambda x: (x, self.__getattribute__(x)), self.__slots__))
-
-        return state
+        return {x: self.__getattribute__(x) for x in self.__slots__}
 
     def __setstate__(self, state):
         for attribute, value in state.items():
@@ -161,11 +159,8 @@ class CFGModel(Serializable):
 
     @classmethod
     def parse_from_cmessage(cls, cmsg, cfg_manager=None, loader=None):  # pylint:disable=arguments-differ
-        if cfg_manager is None:
-            # create a new model unassociated from any project
-            model = cls(cmsg.ident)
-        else:
-            model = cfg_manager.new_model(cmsg.ident)
+        # create a new model unassociated from any project
+        model = cls(cmsg.ident) if cfg_manager is None else cfg_manager.new_model(cmsg.ident)
 
         # nodes
         for node_pb2 in cmsg.nodes:
@@ -173,14 +168,15 @@ class CFGModel(Serializable):
             model._nodes[node.block_id] = node
             model._nodes_by_addr[node.addr].append(node)
             model.graph.add_node(node)
-            if len(model._nodes_by_addr[node.block_id]) > 1:
-                if once("cfg_model_parse_from_cmessage many nodes at addr"):
-                    l.warning(
-                        "Importing a CFG with more than one node for a given address is currently unsupported. "
-                        "The resulting graph may be broken."
-                    )
+            if len(model._nodes_by_addr[node.block_id]) > 1 and once(
+                "cfg_model_parse_from_cmessage many nodes at addr"
+            ):
+                l.warning(
+                    "Importing a CFG with more than one node for a given address is currently unsupported. "
+                    "The resulting graph may be broken."
+                )
 
-        model._node_addrs = list(sorted(model._nodes_by_addr.keys()))
+        model._node_addrs = sorted(model._nodes_by_addr.keys())
 
         # edges
         for edge_pb2 in cmsg.edges:
@@ -284,7 +280,7 @@ class CFGModel(Serializable):
         :param addr:            Address of the beginning of the basic block. Set anyaddr to True to support arbitrary
                                 address.
         :param is_syscall:      Whether you want to get the syscall node or any other node. This is due to the fact that
-                                syscall SimProcedures have the same address as the targer it returns to.
+                                syscall SimProcedures have the same address as the target it returns to.
                                 None means get either, True means get a syscall node, False means get something that
                                 isn't a syscall node.
         :param anyaddr:         If anyaddr is True, then addr doesn't have to be the beginning address of a basic
@@ -318,10 +314,7 @@ class CFGModel(Serializable):
                 if actual_addr > addr:
                     break
 
-                if is_cfgemulated:
-                    cond = n.looping_times == 0
-                else:
-                    cond = True
+                cond = n.looping_times == 0 if is_cfgemulated else True
                 if anyaddr and n.size is not None:
                     cond = cond and (addr == actual_addr or actual_addr <= addr < actual_addr + n.size)
                 else:
@@ -336,7 +329,7 @@ class CFGModel(Serializable):
 
         return None
 
-    def get_all_nodes(self, addr: int, is_syscall: bool = None, anyaddr: bool = False) -> list[CFGNode]:
+    def get_all_nodes(self, addr: int, is_syscall: bool | None = None, anyaddr: bool = False) -> list[CFGNode]:
         """
         Get all CFGNodes whose address is the specified one.
 
@@ -347,11 +340,11 @@ class CFGModel(Serializable):
         results = []
 
         for cfg_node in self.graph.nodes():
-            if cfg_node.addr == addr or (
-                anyaddr and cfg_node.size is not None and cfg_node.addr <= addr < (cfg_node.addr + cfg_node.size)
-            ):
-                if is_syscall is None or is_syscall == cfg_node.is_syscall:
-                    results.append(cfg_node)
+            if (
+                cfg_node.addr == addr
+                or (anyaddr and cfg_node.size is not None and cfg_node.addr <= addr < (cfg_node.addr + cfg_node.size))
+            ) and (is_syscall is None or is_syscall == cfg_node.is_syscall):
+                results.append(cfg_node)
 
         return results
 
@@ -426,9 +419,8 @@ class CFGModel(Serializable):
         :rtype:                             list
         """
 
-        if jumpkind is not None:
-            if excluding_fakeret and jumpkind == "Ijk_FakeRet":
-                return []
+        if jumpkind is not None and excluding_fakeret and jumpkind == "Ijk_FakeRet":
+            return []
 
         if not excluding_fakeret and jumpkind is None:
             # fast path
@@ -592,10 +584,7 @@ class CFGModel(Serializable):
                 # TODO: Handle data in code regions (or executable regions)
                 pass
             else:
-                if i + 1 != len(keys):
-                    next_data_addr = keys[i + 1]
-                else:
-                    next_data_addr = None
+                next_data_addr = keys[i + 1] if i + 1 != len(keys) else None
 
                 # goes until the end of the section/segment
                 # TODO: the logic needs more testing
@@ -608,7 +597,7 @@ class CFGModel(Serializable):
                     last_addr = sec.vaddr + sec.memsize
                 else:
                     # it does not belong to any section. what's the next adjacent section? any memory data does not go
-                    # beyong section boundaries
+                    # beyond section boundaries
                     next_sec = self.project.loader.find_section_next_to(data_addr)
                     if next_sec is not None:
                         next_sec_addr = next_sec.vaddr
@@ -700,10 +689,7 @@ class CFGModel(Serializable):
                 if data_type == MemoryDataSort.PointerArray:
                     # make sure all pointers are identified
                     pointer_size = self.project.arch.bytes
-                    if xrefs is not None:
-                        old_crs = xrefs.get_xrefs_by_dst(data_addr)
-                    else:
-                        old_crs = []
+                    old_crs = xrefs.get_xrefs_by_dst(data_addr) if xrefs is not None else []
 
                     for j in range(0, data_size, pointer_size):
                         ptr = self.project.loader.fast_memory_load_pointer(data_addr + j)
@@ -735,7 +721,8 @@ class CFGModel(Serializable):
                             new_data_found = True
 
             else:
-                memory_data.size = memory_data.max_size
+                if memory_data.max_size is not None:
+                    memory_data.size = memory_data.max_size
 
             if seg_list is not None:
                 seg_list.occupy(data_addr, memory_data.size, memory_data.sort)
@@ -950,10 +937,7 @@ class CFGModel(Serializable):
 
     @staticmethod
     def _addr_in_exec_memory_regions(addr: int, exec_mem_regions: list[tuple[int, int]]) -> bool:
-        for start, end in exec_mem_regions:
-            if start <= addr < end:
-                return True
-        return False
+        return any(start <= addr < end for start, end in exec_mem_regions)
 
     def remove_node_and_graph_node(self, node: CFGNode) -> None:
         """

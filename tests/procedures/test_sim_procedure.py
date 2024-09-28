@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # pylint: disable=missing-class-docstring,no-self-use,line-too-long
+from __future__ import annotations
+
 __package__ = __package__ or "tests.procedures"  # pylint:disable=redefined-builtin
 
 import os
@@ -75,7 +77,7 @@ class TestSimProcedure(unittest.TestCase):
         assert not proj.is_hooked(node.addr)
         assert func.is_syscall
         assert func.is_simprocedure
-        assert type(proj.factory.snippet(node.addr)) == SyscallNode
+        assert isinstance(proj.factory.snippet(node.addr), SyscallNode)
 
         # check normal functions
         node = cfg.get_any_node(0x80480A0)
@@ -86,7 +88,7 @@ class TestSimProcedure(unittest.TestCase):
         assert not proj.is_hooked(node.addr)
         assert not func.is_syscall
         assert not func.is_simprocedure
-        assert type(proj.factory.snippet(node.addr)) == BlockNode
+        assert isinstance(proj.factory.snippet(node.addr), BlockNode)
 
         # check hooked functions
         proj.hook(0x80480A0, angr.SIM_PROCEDURES["libc"]["puts"]())
@@ -99,7 +101,7 @@ class TestSimProcedure(unittest.TestCase):
         assert proj.is_hooked(node.addr)
         assert not func.is_syscall
         assert func.is_simprocedure
-        assert type(proj.factory.snippet(node.addr)) == HookNode
+        assert isinstance(proj.factory.snippet(node.addr), HookNode)
 
     def test_inet_ntoa(self) -> None:
         """

@@ -1,9 +1,11 @@
 # pylint:disable=unnecessary-pass
+from __future__ import annotations
 import logging
 
 from ailment import Block
 from ailment.statement import ConditionalJump, Return
 
+from ..structuring import SAILRStructurer, DreamStructurer
 from ....utils.graph import subgraph_between_nodes
 from ..utils import remove_labels, to_ail_supergraph, update_labels
 from .optimization_pass import OptimizationPass, OptimizationPassStage
@@ -28,6 +30,7 @@ class ReturnDeduplicator(OptimizationPass):
     STAGE = OptimizationPassStage.DURING_REGION_IDENTIFICATION
     NAME = "Deduplicates return statements that may have been duplicated"
     DESCRIPTION = __doc__.strip()
+    STRUCTURING = [SAILRStructurer.NAME, DreamStructurer.NAME]
 
     def __init__(self, func, **kwargs):
         super().__init__(func, **kwargs)
@@ -59,7 +62,7 @@ class ReturnDeduplicator(OptimizationPass):
              D
 
 
-        The super blocks of the true and falst child will be used as the replacement for the true and false child
+        The super blocks of the true and false child will be used as the replacement for the true and false child
         to assure correctness.
         """
 
@@ -203,7 +206,7 @@ class ReturnDeduplicator(OptimizationPass):
         for super_blocks in if_ret_candidates:
             corrected_region = []
             for super_block in super_blocks:
-                block = super_block_map.get(super_block, None)
+                block = super_block_map.get(super_block)
                 if block is None:
                     break
 

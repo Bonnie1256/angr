@@ -1,4 +1,5 @@
 # pylint:disable=unused-argument
+from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import claripy
@@ -27,7 +28,7 @@ class SimEngineVRVEX(
     Implements the VEX engine for variable recovery analysis.
     """
 
-    state: "VariableRecoveryStateBase"
+    state: VariableRecoveryStateBase
 
     def __init__(self, *args, call_info=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -41,8 +42,8 @@ class SimEngineVRVEX(
     def _is_top(self, expr: RichR) -> bool:
         return self.state.is_top(expr)
 
-    def _top(self, size: int):
-        return self.state.top(size)
+    def _top(self, size: int) -> RichR:
+        return RichR(self.state.top(size))
 
     def _process_Stmt(self, whitelist=None):
         scanner = VEXIRSBScanner(logger=self.l)
@@ -143,16 +144,14 @@ class SimEngineVRVEX(
         #    49 | t300 = ITE(t299,0x00000000,t143)
         #    50 | PUT(r3) = t300
         #    51 | PUT(pc) = 0x000feca5
-        if is_arm_arch(self.arch) and (self.ins_addr & 1) == 1:
-            if self.stmt_idx < len(self.block.vex.statements) - 1:
-                next_stmt = self.block.vex.statements[self.stmt_idx + 1]
-                if isinstance(next_stmt, pyvex.IRStmt.WrTmp) and isinstance(next_stmt.data, pyvex.IRExpr.ITE):
-                    return RichR(self.state.top(reg_size * 8))
+        if is_arm_arch(self.arch) and (self.ins_addr & 1) == 1 and self.stmt_idx < len(self.block.vex.statements) - 1:
+            next_stmt = self.block.vex.statements[self.stmt_idx + 1]
+            if isinstance(next_stmt, pyvex.IRStmt.WrTmp) and isinstance(next_stmt.data, pyvex.IRExpr.ITE):
+                return RichR(self.state.top(reg_size * 8))
 
         force_variable_size = None
-        if self.stmts_to_lower and self.stmt_idx in self.stmts_to_lower:
-            if reg_size == 8:
-                force_variable_size = 4
+        if self.stmts_to_lower and self.stmt_idx in self.stmts_to_lower and reg_size == 8:
+            force_variable_size = 4
 
         return self._read_from_register(
             reg_offset,
@@ -255,10 +254,13 @@ class SimEngineVRVEX(
             typevar = typevars.DerivedTypeVariable(r0.typevar, typevars.AddN(r1.data.concrete_value))
 
         sum_ = r0.data + r1.data
+        tc = set()
+        if r0.typevar is not None and r1.typevar is not None:
+            tc.add(typevars.Subtype(r0.typevar, r1.typevar))
         return RichR(
             sum_,
             typevar=typevar,
-            type_constraints={typevars.Subtype(r0.typevar, r1.typevar)},
+            type_constraints=tc,
         )
 
     def _handle_Sub(self, expr):
@@ -502,6 +504,9 @@ class SimEngineVRVEX(
     def _handle_Clz(self, expr):
         return RichR(self.state.top(expr.result_size(self.tyenv)))
 
+    def _handle_Ctz(self, expr):
+        return RichR(self.state.top(expr.result_size(self.tyenv)))
+
     def _handle_Mull(self, expr):
         return RichR(self.state.top(expr.result_size(self.tyenv)))
 
@@ -553,24 +558,6 @@ class SimEngineVRVEX(
     def _handle_ExpCmpNE64(self, expr):
         _, _ = self._expr(expr.args[0]), self._expr(expr.args[1])
         return RichR(self.state.top(expr.result_size(self.tyenv)))
-
-    def _handle_Clz(self, expr):
-        arg0 = expr.args[0]
-        expr_0 = self._expr(arg0)
-        if expr_0 is None:
-            return None
-        if self.state.is_top(expr_0.data):
-            return RichR(self.state.top(expr_0.data.size()))
-        return RichR(self.state.top(expr_0.data.size()))
-
-    def _handle_Ctz(self, expr):
-        arg0 = expr.args[0]
-        expr_0 = self._expr(arg0)
-        if expr_0 is None:
-            return None
-        if self.state.is_top(expr_0.data):
-            return RichR(self.state.top(expr_0.data.size()))
-        return RichR(self.state.top(expr_0.data.size()))
 
     _handle_CmpEQ_v = _handle_Cmp_v
     _handle_CmpNE_v = _handle_Cmp_v

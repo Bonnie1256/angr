@@ -1,33 +1,44 @@
+from __future__ import annotations
+
+import contextlib
 import functools
 import itertools
-import contextlib
-import weakref
-
 import logging
-
+import weakref
 from typing import TypeVar, TYPE_CHECKING
 
-from archinfo import Arch
-
-l = logging.getLogger(name=__name__)
-
-import claripy
 import archinfo
+import claripy
+from archinfo import Arch
 from archinfo.arch_soot import SootAddressDescriptor
 
+from . import sim_options as o
+from .errors import SimMergeError, SimValueError, SimStateError, SimSolverModeError
 from .misc.plugins import PluginHub, PluginPreset
 from .sim_state_options import SimStateOptions
 from .state_plugins import SimStatePlugin
 
+if TYPE_CHECKING:
+    from .storage import DefaultMemory
+    from .state_plugins.solver import SimSolver
+    from .state_plugins.posix import SimSystemPosix
+    from .state_plugins.view import SimRegNameView, SimMemView
+    from .state_plugins.callstack import CallStack
+    from .state_plugins.inspect import SimInspector
+    from .state_plugins.jni_references import SimStateJNIReferences
+    from .state_plugins.scratch import SimStateScratch
 
-def arch_overrideable(f):
+
+l = logging.getLogger(name=__name__)
+
+
+def arch_overridable(f):
     @functools.wraps(f)
     def wrapped_f(self, *args, **kwargs):
         if hasattr(self.arch, f.__name__):
             arch_f = getattr(self.arch, f.__name__)
             return arch_f(self, *args, **kwargs)
-        else:
-            return f(self, *args, **kwargs)
+        return f(self, *args, **kwargs)
 
     return wrapped_f
 
@@ -63,17 +74,17 @@ class SimState(PluginHub):
     """
 
     # Type Annotations for default plugins to allow type inference
-    solver: "SimSolver"
-    posix: "SimSystemPosix"
-    registers: "DefaultMemory"
-    regs: "SimRegNameView"
-    memory: "DefaultMemory"
-    callstack: "CallStack"
-    mem: "SimMemView"
-    history: "SimStateHistory"
-    inspect: "SimInspector"
-    jni_references: "SimStateJNIReferences"
-    scratch: "SimStateScratch"
+    solver: SimSolver
+    posix: SimSystemPosix
+    registers: DefaultMemory
+    regs: SimRegNameView
+    memory: DefaultMemory
+    callstack: CallStack
+    mem: SimMemView
+    history: SimStateHistory
+    inspect: SimInspector
+    jni_references: SimStateJNIReferences
+    scratch: SimStateScratch
 
     def __init__(
         self,
@@ -260,7 +271,7 @@ class SimState(PluginHub):
     def __getstate__(self):
         # Don't pickle attributes for plugins. These will be pickled
         # through self._active_plugins.
-        s = {k: v for k, v in self.__dict__.items() if k not in self._active_plugins.keys()}
+        s = {k: v for k, v in self.__dict__.items() if k not in self._active_plugins}
         s["_active_plugins"] = {k: v for k, v in s["_active_plugins"].items() if k not in ("inspect", "regs", "mem")}
         return s
 
@@ -280,14 +291,11 @@ class SimState(PluginHub):
     def __repr__(self):
         try:
             addr = self.addr
-            if type(addr) is int:
-                ip_str = "%#x" % addr
-            else:
-                ip_str = repr(addr)
+            ip_str = f"{addr:#x}" if type(addr) is int else repr(addr)
         except (SimValueError, SimSolverModeError):
             ip_str = repr(self.regs.ip)
 
-        return "<SimState @ %s>" % ip_str
+        return f"<SimState @ {ip_str}>"
 
     def __setattr__(self, key, value):
         if key == "options":
@@ -303,7 +311,7 @@ class SimState(PluginHub):
         elif isinstance(v, SimStateOptions):
             super().__setattr__("options", v)
         else:
-            raise SimStateError("Unsupported type '%s' in SimState.options.setter()." % type(v))
+            raise SimStateError(f"Unsupported type '{type(v)}' in SimState.options.setter().")
 
     #
     # Easier access to some properties
@@ -382,8 +390,7 @@ class SimState(PluginHub):
     def arch(self) -> Arch:
         if self._is_java_jni_project:
             return self._arch["soot"] if self.ip_is_soot_addr else self._arch["vex"]
-        else:
-            return self._arch
+        return self._arch
 
     @arch.setter
     def arch(self, v):
@@ -400,9 +407,8 @@ class SimState(PluginHub):
     T = TypeVar("T")
 
     def _inspect_getattr(self, attr: str, default_value: T):
-        if self.supports_inspect:
-            if hasattr(self.inspect, attr):
-                return getattr(self.inspect, attr)
+        if self.supports_inspect and hasattr(self.inspect, attr):
+            return getattr(self.inspect, attr)
 
         return default_value
 
@@ -455,8 +461,7 @@ class SimState(PluginHub):
         """
         if self._is_java_jni_project:
             return self.get_plugin("memory_soot")
-        else:
-            return self.get_plugin("memory")
+        return self.get_plugin("memory")
 
     @property
     def javavm_registers(self):
@@ -468,8 +473,7 @@ class SimState(PluginHub):
         """
         if self._is_java_jni_project:
             return self.get_plugin("registers_soot")
-        else:
-            return self.get_plugin("registers")
+        return self.get_plugin("registers")
 
     #
     # Constraint pass-throughs
@@ -491,10 +495,7 @@ class SimState(PluginHub):
             raise Exception("Tuple or list passed to add_constraints!")
 
         if o.TRACK_CONSTRAINTS in self.options and len(args) > 0:
-            if o.SIMPLIFY_CONSTRAINTS in self.options:
-                constraints = [self.simplify(a) for a in args]
-            else:
-                constraints = args
+            constraints = [self.simplify(a) for a in args] if o.SIMPLIFY_CONSTRAINTS in self.options else args
 
             self._inspect("constraints", BP_BEFORE, added_constraints=constraints)
             constraints = self._inspect_getattr("added_constraints", constraints)
@@ -523,22 +524,12 @@ class SimState(PluginHub):
                 if self.solver.is_true(arg):
                     continue
 
-                # `is_true` and `is_false` does not use VSABackend currently (see commits 97a75366 and 2dfba73e in
-                # claripy). There is a chance that VSA backend can in fact handle it.
-                # Therefore we try to resolve it with VSABackend again
-                if claripy.backends.vsa.is_false(arg):
-                    self._satisfiable = False
-                    return
-
-                if claripy.backends.vsa.is_true(arg):
-                    continue
-
                 # It's neither True or False. Let's try to apply the condition
 
                 # We take the argument, extract a list of constrained SIs out of it (if we could, of course), and
                 # then replace each original SI the intersection of original SI and the constrained one.
 
-                _, converted = self.solver.constraint_to_si(arg)
+                _, converted = claripy.constraint_to_si(arg)
 
                 for original_expr, constrained_si in converted:
                     if not original_expr.variables:
@@ -580,8 +571,7 @@ class SimState(PluginHub):
                     return False
 
             return self._satisfiable
-        else:
-            return self.solver.satisfiable(**kwargs)
+        return self.solver.satisfiable(**kwargs)
 
     def downsize(self):
         """
@@ -680,15 +670,18 @@ class SimState(PluginHub):
         common_ancestor_history = kwargs.pop("common_ancestor_history", None)
 
         if len(kwargs) != 0:
-            raise ValueError("invalid arguments: %s" % kwargs.keys())
+            raise ValueError(f"invalid arguments: {kwargs.keys()}")
 
         if merge_conditions is None:
             # TODO: maybe make the length of this smaller? Maybe: math.ceil(math.log(len(others)+1, 2))
-            merge_flag = self.solver.BVS("state_merge_%d" % next(merge_counter), 16)
+            merge_flag = claripy.BVS("state_merge_%d" % next(merge_counter), 16)
             merge_values = range(len(others) + 1)
             merge_conditions = [merge_flag == b for b in merge_values]
         else:
-            merge_conditions = [(self.solver.true if len(mc) == 0 else self.solver.And(*mc)) for mc in merge_conditions]
+            merge_conditions = [
+                (claripy.true() if len(mc) == 0 else claripy.And(*[c.to_claripy() for c in mc]))
+                for mc in merge_conditions
+            ]
 
         if len({o.arch.name for o in others}) != 1:
             raise SimMergeError("Unable to merge due to different architectures.")
@@ -706,8 +699,8 @@ class SimState(PluginHub):
 
         # plugins
         for p in all_plugins:
-            our_plugin = merged.plugins[p] if p in merged.plugins else None
-            their_plugins = [(pl.plugins[p] if p in pl.plugins else None) for pl in others]
+            our_plugin = merged.plugins.get(p, None)
+            their_plugins = [(pl.plugins.get(p, None)) for pl in others]
 
             plugin_classes = ({our_plugin.__class__} | {pl.__class__ for pl in their_plugins}) - {None.__class__}
             if len(plugin_classes) != 1:
@@ -738,7 +731,7 @@ class SimState(PluginHub):
                 l.debug("Merging occurred in %s", p)
                 merging_occurred = True
 
-        merged.add_constraints(merged.solver.Or(*merge_conditions))
+        merged.add_constraints(claripy.Or(*merge_conditions))
         return merged, merge_conditions, merging_occurred
 
     def widen(self, *others):
@@ -795,7 +788,7 @@ class SimState(PluginHub):
     ### Stack operation helpers ###
     ###############################
 
-    @arch_overrideable
+    @arch_overridable
     def stack_push(self, thing):
         """
         Push 'thing' to the stack, writing the thing to memory and adjusting the stack pointer.
@@ -805,7 +798,7 @@ class SimState(PluginHub):
         self.regs.sp = sp
         return self.memory.store(sp, thing, endness=self.arch.memory_endness, size=self.arch.bytes)
 
-    @arch_overrideable
+    @arch_overridable
     def stack_pop(self):
         """
         Pops from the stack and returns the popped thing. The length will be the architecture word size.
@@ -814,7 +807,7 @@ class SimState(PluginHub):
         self.regs.sp = sp - self.arch.stack_change
         return self.memory.load(sp, self.arch.bytes, endness=self.arch.memory_endness)
 
-    @arch_overrideable
+    @arch_overridable
     def stack_read(self, offset, length, bp=False):
         """
         Reads length bytes, at an offset into the stack.
@@ -842,7 +835,7 @@ class SimState(PluginHub):
         return v
 
     # This handles the preparation of concrete function launches from abstract functions.
-    @arch_overrideable
+    @arch_overridable
     def prepare_callsite(self, retval, args, cc="wtf"):
         # TODO
         pass
@@ -858,7 +851,7 @@ class SimState(PluginHub):
         strings = []
         for stack_value in stack_values:
             if self.solver.symbolic(stack_value):
-                concretized_value = "SYMBOLIC - %s" % repr(stack_value)
+                concretized_value = f"SYMBOLIC - {stack_value!r}"
             else:
                 if len(self.solver.eval_upto(stack_value, 2)) == 2:
                     concretized_value = repr(stack_value)
@@ -885,7 +878,7 @@ class SimState(PluginHub):
         else:
             sp_value = sp if sp is not None else self.solver.eval(sp_sim)
             if self.solver.symbolic(bp_sim):
-                result = "SP = 0x%08x, BP is symbolic\n" % (sp_value)
+                result = f"SP = 0x{sp_value:08x}, BP is symbolic\n"
                 bp_value = None
             else:
                 bp_value = self.solver.eval(bp_sim)
@@ -942,9 +935,8 @@ class SimState(PluginHub):
             new_state.add_constraints(new_state.regs.ip % 2 == 1, new_state.regs.ip % 2 != 0)
             return new_state.satisfiable()
 
-        else:
-            concrete_ip = self.solver.eval(self.regs.ip)
-            return concrete_ip % 2 == 1
+        concrete_ip = self.solver.eval(self.regs.ip)
+        return concrete_ip % 2 == 1
 
     #
     # Some pretty fancy global condition stuff!
@@ -956,7 +948,7 @@ class SimState(PluginHub):
         def ctx(c):
             old_condition = self._global_condition
             try:
-                new_condition = c if old_condition is None else self.solver.And(old_condition, c)
+                new_condition = c if old_condition is None else claripy.And(old_condition, c)
                 self._global_condition = new_condition
                 yield
             finally:
@@ -967,18 +959,16 @@ class SimState(PluginHub):
     def _adjust_condition(self, c):
         if self._global_condition is None:
             return c
-        elif c is None:
+        if c is None:
             return self._global_condition
-        else:
-            return self.solver.And(self._global_condition, c)
+        return claripy.And(self._global_condition, c)
 
     def _adjust_condition_list(self, conditions):
         if self._global_condition is None:
             return conditions
-        elif len(conditions) == 0:
+        if len(conditions) == 0:
             return conditions.__class__((self._global_condition,))
-        else:
-            return conditions.__class__((self._adjust_condition(self.solver.And(*conditions)),))
+        return conditions.__class__((self._adjust_condition(claripy.And(*conditions)),))
 
 
 default_state_plugin_preset = PluginPreset()
@@ -987,17 +977,3 @@ SimState.register_preset("default", default_state_plugin_preset)
 from .state_plugins.history import SimStateHistory
 from .state_plugins.inspect import BP_AFTER, BP_BEFORE
 from .state_plugins.sim_action import SimActionConstraint
-
-from . import sim_options as o
-from .errors import SimMergeError, SimValueError, SimStateError, SimSolverModeError
-
-# Type imports for annotations
-if TYPE_CHECKING:
-    from .storage import DefaultMemory
-    from .state_plugins.solver import SimSolver
-    from .state_plugins.posix import SimSystemPosix
-    from .state_plugins.view import SimRegNameView, SimMemView
-    from .state_plugins.callstack import CallStack
-    from .state_plugins.inspect import SimInspector
-    from .state_plugins.jni_references import SimStateJNIReferences
-    from .state_plugins.scratch import SimStateScratch

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import claripy
 
 from ..errors import SimMemoryError
@@ -10,6 +11,7 @@ def obj_bit_size(o):
 
 
 # TODO: get rid of is_bytes and have the bytes-backed objects be a separate class
+# pylint: disable=too-many-positional-arguments
 
 
 class SimMemoryObject:
@@ -56,10 +58,6 @@ class SimMemoryObject:
         return self.object.variables
 
     @property
-    def cache_key(self):
-        return self.object.cache_key
-
-    @property
     def symbolic(self):
         return self.object.symbolic
 
@@ -68,9 +66,13 @@ class SimMemoryObject:
         return self.base + self.length - 1
 
     def concrete_bytes(self, offset: int, size: int) -> bytes | None:
-        if self._concrete_bytes is None:
-            if isinstance(self.object, claripy.ast.Bits) and self.object.op == "BVV" and not self.object.annotations:
-                self._concrete_bytes = self.object.concrete_value.to_bytes(len(self.object) // self._byte_width, "big")
+        if (
+            self._concrete_bytes is None
+            and isinstance(self.object, claripy.ast.Bits)
+            and self.object.op == "BVV"
+            and not self.object.annotations
+        ):
+            self._concrete_bytes = self.object.concrete_value.to_bytes(len(self.object) // self._byte_width, "big")
 
         if self._concrete_bytes is None:
             return None
@@ -83,7 +85,7 @@ class SimMemoryObject:
     def bytes_at(self, addr, length, allow_concrete=False, endness="Iend_BE"):
         rev = endness != self.endness
         if allow_concrete and rev:
-            raise Exception("allow_concrete must be used with the stored endness")
+            raise ValueError("allow_concrete must be used with the stored endness")
 
         if self.is_bytes:
             if addr == self.base and length == self.length:
@@ -95,25 +97,24 @@ class SimMemoryObject:
 
             return o if allow_concrete else claripy.BVV(o)
 
-        else:
-            offset = addr - self.base
-            try:
-                thing = bv_slice(self.object, offset, length, self.endness == "Iend_LE", self._byte_width)
-            except claripy.ClaripyOperationError:
-                # hacks to handle address space wrapping
-                if offset >= 0:
-                    raise
-                if offset + 2**32 >= 0:
-                    offset += 2**32
-                elif offset + 2**64 >= 0:
-                    offset += 2**64
-                else:
-                    raise
-                thing = bv_slice(self.object, offset, length, self.endness == "Iend_LE", self._byte_width)
+        offset = addr - self.base
+        try:
+            thing = bv_slice(self.object, offset, length, self.endness == "Iend_LE", self._byte_width)
+        except claripy.ClaripyOperationError:
+            # hacks to handle address space wrapping
+            if offset >= 0:
+                raise
+            if offset + 2**32 >= 0:
+                offset += 2**32
+            elif offset + 2**64 >= 0:
+                offset += 2**64
+            else:
+                raise
+            thing = bv_slice(self.object, offset, length, self.endness == "Iend_LE", self._byte_width)
 
-            if self.endness != endness:
-                thing = thing.reversed
-            return thing
+        if self.endness != endness:
+            thing = thing.reversed
+        return thing
 
     def _object_equals(self, other):
         if self.is_bytes != other.is_bytes:
@@ -121,17 +122,15 @@ class SimMemoryObject:
 
         if self.is_bytes:
             return self.object == other.object
-        else:
-            return self.object.cache_key == other.object.cache_key
+        return self.object.hash() == other.object.hash()
 
     def _length_equals(self, other):
-        if type(self.length) is not type(other.length):  # noqa: E721
+        if type(self.length) is not type(other.length):
             return False
 
         if isinstance(self.length, int):
             return self.length == other.length
-        else:
-            return self.length.cache_key == other.length.cache_key
+        return self.length.hash() == other.length.hash()
 
     def __eq__(self, other):
         if self is other:
@@ -143,17 +142,18 @@ class SimMemoryObject:
         return self.base == other.base and self._object_equals(other) and self._length_equals(other)
 
     def __hash__(self):
-        obj_hash = hash(self.object) if self.is_bytes else self.object.cache_key
-        return hash((obj_hash, self.base, hash(self.length)))
+        return hash((self.object, self.base, self.length))
 
     def __ne__(self, other):
         return not self == other
 
     def __repr__(self):
-        return "MO(%s)" % self.object
+        return f"MO({self.object})"
 
 
 class SimLabeledMemoryObject(SimMemoryObject):
+    """SimLabeledMemoryObject is a SimMemoryObject with a label"""
+
     __slots__ = ("label",)
 
     def __init__(self, obj, base, endness, length=None, byte_width=8, label=None):

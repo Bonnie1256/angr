@@ -1,5 +1,5 @@
 # pylint:disable=missing-class-docstring
-from typing import DefaultDict
+from __future__ import annotations
 import enum
 from collections import defaultdict
 import logging
@@ -169,7 +169,7 @@ class Sketch:
         "solver",
     )
 
-    def __init__(self, solver: "SimpleSolver", root: TypeVariable):
+    def __init__(self, solver: SimpleSolver, root: TypeVariable):
         self.root: SketchNode = SketchNode(root)
         self.graph = networkx.DiGraph()
         self.node_mapping: dict[TypeVariable | DerivedTypeVariable, SketchNodeBase] = {}
@@ -298,46 +298,34 @@ class ConstraintGraphNode:
     def __hash__(self):
         return hash((ConstraintGraphNode, self.typevar, self.variance, self.tag, self.forgotten))
 
-    def forget_last_label(self) -> tuple["ConstraintGraphNode", BaseLabel] | None:
+    def forget_last_label(self) -> tuple[ConstraintGraphNode, BaseLabel] | None:
         if isinstance(self.typevar, DerivedTypeVariable) and self.typevar.labels:
             last_label = self.typevar.labels[-1]
             if len(self.typevar.labels) == 1:
                 prefix = self.typevar.type_var
             else:
                 prefix = DerivedTypeVariable(self.typevar.type_var, None, labels=self.typevar.labels[:-1])
-            if self.variance == last_label.variance:
-                variance = Variance.COVARIANT
-            else:
-                variance = Variance.CONTRAVARIANT
+            variance = Variance.COVARIANT if self.variance == last_label.variance else Variance.CONTRAVARIANT
             return (
                 ConstraintGraphNode(prefix, variance, self.tag, FORGOTTEN.PRE_FORGOTTEN),
                 self.typevar.labels[-1],
             )
         return None
 
-    def recall(self, label: BaseLabel) -> "ConstraintGraphNode":
+    def recall(self, label: BaseLabel) -> ConstraintGraphNode:
         if isinstance(self.typevar, DerivedTypeVariable):
-            labels = self.typevar.labels + (label,)
+            labels = (*self.typevar.labels, label)
             typevar = self.typevar.type_var
-        elif isinstance(self.typevar, TypeVariable):
-            labels = (label,)
-            typevar = self.typevar
-        elif isinstance(self.typevar, TypeConstant):
+        elif isinstance(self.typevar, (TypeVariable, TypeConstant)):
             labels = (label,)
             typevar = self.typevar
         else:
             raise TypeError(f"Unsupported type {type(self.typevar)}")
-        if self.variance == label.variance:
-            variance = Variance.COVARIANT
-        else:
-            variance = Variance.CONTRAVARIANT
-        if not labels:
-            var = typevar
-        else:
-            var = DerivedTypeVariable(typevar, None, labels=labels)
+        variance = Variance.COVARIANT if self.variance == label.variance else Variance.CONTRAVARIANT
+        var = typevar if not labels else DerivedTypeVariable(typevar, None, labels=labels)
         return ConstraintGraphNode(var, variance, self.tag, FORGOTTEN.PRE_FORGOTTEN)
 
-    def inverse(self) -> "ConstraintGraphNode":
+    def inverse(self) -> ConstraintGraphNode:
         if self.tag == ConstraintGraphTag.LEFT:
             tag = ConstraintGraphTag.RIGHT
         elif self.tag == ConstraintGraphTag.RIGHT:
@@ -345,21 +333,15 @@ class ConstraintGraphNode:
         else:
             tag = ConstraintGraphTag.UNKNOWN
 
-        if self.variance == Variance.COVARIANT:
-            variance = Variance.CONTRAVARIANT
-        else:
-            variance = Variance.COVARIANT
+        variance = Variance.CONTRAVARIANT if self.variance == Variance.COVARIANT else Variance.COVARIANT
 
         return ConstraintGraphNode(self.typevar, variance, tag, self.forgotten)
 
-    def inverse_wo_tag(self) -> "ConstraintGraphNode":
+    def inverse_wo_tag(self) -> ConstraintGraphNode:
         """
         Invert the variance only.
         """
-        if self.variance == Variance.COVARIANT:
-            variance = Variance.CONTRAVARIANT
-        else:
-            variance = Variance.COVARIANT
+        variance = Variance.CONTRAVARIANT if self.variance == Variance.COVARIANT else Variance.COVARIANT
 
         return ConstraintGraphNode(self.typevar, variance, self.tag, self.forgotten)
 
@@ -397,8 +379,13 @@ class SimpleSolver:
             if self._constraints[typevar]:
                 self._constraints[typevar] |= self._eq_constraints_from_add(typevar)
                 self._constraints[typevar] = self._handle_equivalence(typevar)
-        equ_classes, sketches, _ = self.solve()
+
         self.solution = {}
+        for tv, sol in self._equivalence.items():
+            if isinstance(tv, TypeVariable) and isinstance(sol, TypeConstant):
+                self.solution[tv] = sol
+
+        equ_classes, sketches, _ = self.solve()
         self._solution_cache = {}
         self.determine(equ_classes, sketches, self.solution)
         for typevar in list(self._constraints):
@@ -415,7 +402,16 @@ class SimpleSolver:
         - Apply constraints to derive the lower and upper bounds
         """
 
-        typevars = set(self._constraints) | self._typevars
+        prem_typevars = set(self._constraints) | self._typevars
+        typevars = set()
+        for tv in prem_typevars:
+            if tv not in self._equivalence:
+                typevars.add(tv)
+            else:
+                repl = self._equivalence[tv]
+                if isinstance(repl, TypeVariable):
+                    typevars.add(repl)
+
         constraints = set()
         for tv in typevars:
             if tv in self._constraints:
@@ -429,9 +425,8 @@ class SimpleSolver:
                     if isinstance(t, DerivedTypeVariable):
                         if t.type_var in typevars:
                             constrained_typevars.add(t.type_var)
-                    elif isinstance(t, TypeVariable):
-                        if t in typevars:
-                            constrained_typevars.add(t)
+                    elif isinstance(t, TypeVariable) and t in typevars:
+                        constrained_typevars.add(t)
 
         equivalence_classes, sketches = self.infer_shapes(typevars, constraints)
         # TODO: Handle global variables
@@ -681,7 +676,7 @@ class SimpleSolver:
                     graph.add_edge(ta, tb)
 
         for components in networkx.connected_components(graph):
-            components_lst = list(sorted(components, key=lambda x: str(x)))  # pylint:disable=unnecessary-lambda
+            components_lst = sorted(components, key=lambda x: str(x))  # pylint:disable=unnecessary-lambda
             representative = components_lst[0]
             for tv in components_lst[1:]:
                 replacements[tv] = representative
@@ -720,15 +715,21 @@ class SimpleSolver:
             if not isinstance(constraint, Existence):
                 continue
             inner = constraint.type_
-            if isinstance(inner, DerivedTypeVariable) and isinstance(inner.one_label(), IsArray):
-                if inner.type_var in self.solution:
-                    curr_type = self.solution[inner.type_var]
-                    if isinstance(curr_type, Pointer) and isinstance(curr_type.basetype, Struct):
-                        # replace all fields with the first field
-                        if 0 in curr_type.basetype.fields:
-                            first_field = curr_type.basetype.fields[0]
-                            for offset in curr_type.basetype.fields.keys():
-                                curr_type.basetype.fields[offset] = first_field
+            if (
+                isinstance(inner, DerivedTypeVariable)
+                and isinstance(inner.one_label(), IsArray)
+                and inner.type_var in self.solution
+            ):
+                curr_type = self.solution[inner.type_var]
+                if (
+                    isinstance(curr_type, Pointer)
+                    and isinstance(curr_type.basetype, Struct)
+                    and 0 in curr_type.basetype.fields
+                ):
+                    # replace all fields with the first field
+                    first_field = curr_type.basetype.fields[0]
+                    for offset in curr_type.basetype.fields:
+                        curr_type.basetype.fields[offset] = first_field
 
     #
     # Constraint graph
@@ -844,7 +845,7 @@ class SimpleSolver:
         """
         The saturation algorithm D.2 as described in Appendix of the retypd paper.
         """
-        R: DefaultDict[ConstraintGraphNode, set[tuple[BaseLabel, ConstraintGraphNode]]] = defaultdict(set)
+        R: defaultdict[ConstraintGraphNode, set[tuple[BaseLabel, ConstraintGraphNode]]] = defaultdict(set)
 
         # initialize the reaching-push sets R(x)
         for x, y, data in graph.edges(data=True):
@@ -916,9 +917,7 @@ class SimpleSolver:
     def _to_typevar_or_typeconst(obj: TypeVariable | DerivedTypeVariable | TypeConstant) -> TypeVariable | TypeConstant:
         if isinstance(obj, DerivedTypeVariable):
             return SimpleSolver._to_typevar_or_typeconst(obj.type_var)
-        elif isinstance(obj, TypeVariable):
-            return obj
-        elif isinstance(obj, TypeConstant):
+        if isinstance(obj, (TypeVariable, TypeConstant)):
             return obj
         raise TypeError(f"Unsupported type {type(obj)}")
 
@@ -982,12 +981,21 @@ class SimpleSolver:
         abstract_t2 = self.abstract(t2)
         if abstract_t1 in self._base_lattice and abstract_t2 in self._base_lattice:
             ancestor = networkx.lowest_common_ancestor(self._base_lattice, abstract_t1, abstract_t2)
+
+            if (
+                isinstance(ancestor, Pointer)
+                and isinstance(abstract_t1, Pointer)
+                and isinstance(abstract_t2, Pointer)
+                and isinstance(t1, Pointer)
+                and isinstance(t2, Pointer)
+            ):
+                return ancestor.__class__(self.join(t1.basetype, t2.basetype))
+
             if ancestor == abstract_t1:
                 return t1
-            elif ancestor == abstract_t2:
+            if ancestor == abstract_t2:
                 return t2
-            else:
-                return ancestor
+            return ancestor
         if t1 == Bottom_:
             return t2
         if t2 == Bottom_:
@@ -999,12 +1007,21 @@ class SimpleSolver:
         abstract_t2 = self.abstract(t2)
         if abstract_t1 in self._base_lattice_inverted and abstract_t2 in self._base_lattice_inverted:
             ancestor = networkx.lowest_common_ancestor(self._base_lattice_inverted, abstract_t1, abstract_t2)
+
+            if (
+                isinstance(ancestor, Pointer)
+                and isinstance(abstract_t1, Pointer)
+                and isinstance(abstract_t2, Pointer)
+                and isinstance(t1, Pointer)
+                and isinstance(t2, Pointer)
+            ):
+                return ancestor.__class__(self.meet(t1.basetype, t2.basetype))
+
             if ancestor == abstract_t1:
                 return t1
-            elif ancestor == abstract_t2:
+            if ancestor == abstract_t2:
                 return t2
-            else:
-                return ancestor
+            return ancestor
         if t1 == Top_:
             return t2
         if t2 == Top_:
@@ -1015,7 +1032,7 @@ class SimpleSolver:
     def abstract(t: TypeConstant | TypeVariable) -> TypeConstant | TypeVariable:
         if isinstance(t, Pointer32):
             return Pointer32()
-        elif isinstance(t, Pointer64):
+        if isinstance(t, Pointer64):
             return Pointer64()
         return t
 
@@ -1061,7 +1078,7 @@ class SimpleSolver:
                 cached_results.add(self._solution_cache[node.typevar])
         if len(cached_results) == 1:
             return next(iter(cached_results))
-        elif len(cached_results) > 1:
+        if len(cached_results) > 1:
             # we get nodes for multiple type variables?
             raise RuntimeError("Getting nodes for multiple type variables. Unexpected.")
 
@@ -1101,7 +1118,7 @@ class SimpleSolver:
             input_args = []
             output_values = []
             for vals, out in [(func_inputs, input_args), (func_outputs, output_values)]:
-                for idx in range(0, max(vals) + 1):
+                for idx in range(max(vals) + 1):
                     if idx in vals:
                         sol = self._determine(equivalent_classes, the_typevar, sketch, solution, nodes=vals[idx])
                         out.append(sol)
@@ -1158,9 +1175,8 @@ class SimpleSolver:
                 if isinstance(last_label, HasField):
                     for start_offset, sizes in candidate_bases.items():
                         for size in sizes:
-                            if last_label.offset > start_offset:
-                                if last_label.offset < start_offset + size:  # ???
-                                    node_to_base[succ] = start_offset
+                            if last_label.offset > start_offset and last_label.offset < start_offset + size:  # ???
+                                node_to_base[succ] = start_offset
 
             node_by_offset = defaultdict(set)
 
@@ -1241,7 +1257,7 @@ class SimpleSolver:
                     continue
                 if isinstance(label, IsArray):
                     continue
-                new_labels = curr_labels + [label]
+                new_labels = [*curr_labels, label]
                 succ: SketchNode
                 if isinstance(succ.typevar, DerivedTypeVariable) and isinstance(succ.typevar.labels[-1], (Load, Store)):
                     queue.append((new_labels, succ))
@@ -1253,6 +1269,6 @@ class SimpleSolver:
     def _pointer_class(self) -> type[Pointer32] | type[Pointer64]:
         if self.bits == 32:
             return Pointer32
-        elif self.bits == 64:
+        if self.bits == 64:
             return Pointer64
         raise NotImplementedError("Unsupported bits %d" % self.bits)

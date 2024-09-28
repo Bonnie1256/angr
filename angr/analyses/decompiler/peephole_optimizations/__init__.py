@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import List, Type
 
 from .a_div_const_add_a_mul_n_div_const import ADivConstAddAMulNDivConst
@@ -44,6 +45,7 @@ from .inlined_strcpy import InlinedStrcpy
 from .inlined_strcpy_consolidation import InlinedStrcpyConsolidation
 from .inlined_wstrcpy import InlinedWstrcpy
 from .cmpord_rewriter import CmpORDRewriter
+from .coalesce_adjacent_shrs import CoalesceAdjacentShiftRights
 
 from .base import PeepholeOptimizationExprBase, PeepholeOptimizationStmtBase, PeepholeOptimizationMultiStmtBase
 

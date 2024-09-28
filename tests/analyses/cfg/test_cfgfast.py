@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # pylint:disable=missing-class-docstring,no-self-use,wrong-import-order
+from __future__ import annotations
+
 __package__ = __package__ or "tests.analyses.cfg"  # pylint:disable=redefined-builtin
 
 import os
@@ -82,12 +84,9 @@ class TestCfgfast(unittest.TestCase):
         for src, dst in edges:
             src_node = cfg.model.get_any_node(src)
             dst_node = cfg.model.get_any_node(dst)
-            assert src_node is not None, "CFG node 0x%x is not found." % src
-            assert dst_node is not None, "CFG node 0x%x is not found." % dst
-            assert dst_node in src_node.successors, "CFG edge {}-{} is not found.".format(
-                src_node,
-                dst_node,
-            )
+            assert src_node is not None, f"CFG node 0x{src:x} is not found."
+            assert dst_node is not None, f"CFG node 0x{dst:x} is not found."
+            assert dst_node in src_node.successors, f"CFG edge {src_node}-{dst_node} is not found."
 
     def test_cfg_0(self):
         functions = {
@@ -731,10 +730,7 @@ class TestCfgfast(unittest.TestCase):
             )
             assert len(return_block_addrs) == len(expected_return_addrs), msg
             for expected_addr in expected_return_addrs:
-                msg = "expected retaddr {:x} not found for returning_block {:x}".format(
-                    expected_addr,
-                    returning_block_addr,
-                )
+                msg = f"expected retaddr {expected_addr:x} not found for returning_block {returning_block_addr:x}"
                 assert expected_addr in return_block_addrs, msg
 
     #
@@ -978,6 +974,15 @@ class TestCfgfast(unittest.TestCase):
         cfg = proj.analyses.CFGFast()
         assert cfg.kb.functions[0x21514B5600].name == "_security_init_cookie"
 
+    def test_pe_unmapped_section_data(self):
+        path = os.path.join(
+            test_location, "i386", "windows", "0b6e56e2325f8e34fc07669414f6b6fdd45b0de37937947c77c7b81c1fed4329"
+        )
+        proj = angr.Project(path, auto_load_libs=False)
+        cfg = proj.analyses.CFGFast(force_smart_scan=False)
+        for block in cfg.kb.functions[0x42CDD0].blocks:
+            assert block.addr < 0x42CE00
+
 
 class TestCfgfastDataReferences(unittest.TestCase):
     def test_data_references_x86_64(self):
@@ -1099,7 +1104,7 @@ class TestCfgfastDataReferences(unittest.TestCase):
         assert funcs.contains_addr(0x129C4)
         func = funcs[0x129C4]
         assert len(list(func.blocks)) == 1
-        assert list(func.blocks)[0].size == 16
+        assert next(iter(func.blocks)).size == 16
 
     def test_data_references_windows_driver_utf16_strings(self):
         path = os.path.join(
@@ -1117,6 +1122,23 @@ class TestCfgfastDataReferences(unittest.TestCase):
         assert cfg.model.memory_data[0x1DD90].sort == MemoryDataSort.UnicodeString
         assert cfg.model.memory_data[0x1DD90].content == cstring_to_unicode_string(b"ntdll.dll")
         assert cfg.model.memory_data[0x1DD90].size == 20
+
+    def test_pe_32bit_pointer_array_detection(self):
+        path = os.path.join(
+            test_location, "i386", "windows", "53575875777863a69a573be858e75ceea834ea54c844bb528128a4ad16879d45"
+        )
+        proj = angr.Project(path, auto_load_libs=False)
+
+        cfg = proj.analyses.CFGFast(show_progressbar=True)
+        cfg_model = cfg.model
+        assert cfg._seg_list.is_occupied(0x100018BC) is True
+        assert cfg._seg_list.occupied_by_sort(0x100018BC) == "pointer-array"
+        assert cfg_model.memory_data[0x100018BC].size == 4
+        assert cfg_model.memory_data[0x100018BC].sort == MemoryDataSort.PointerArray
+        assert cfg._seg_list.is_occupied(0x10001004) is True
+        assert cfg._seg_list.occupied_by_sort(0x10001004) == "pointer-array"
+        assert cfg_model.memory_data[0x10001004].size == 228
+        assert cfg_model.memory_data[0x10001004].sort == MemoryDataSort.PointerArray
 
 
 if __name__ == "__main__":

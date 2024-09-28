@@ -1,5 +1,6 @@
 # pylint:disable=wrong-import-position,wrong-import-order
-from typing import DefaultDict, TYPE_CHECKING
+from __future__ import annotations
+from typing import TYPE_CHECKING
 import logging
 from collections import defaultdict
 
@@ -8,6 +9,7 @@ import networkx
 import claripy
 import pyvex
 import ailment
+from ailment.expression import VirtualVariable
 
 import angr.errors
 from ...storage.memory_mixins.paged_memory.pages.multi_values import MultiValues
@@ -21,6 +23,7 @@ from ..typehoon.typevars import Equivalence, TypeVariable, TypeVariables
 from .variable_recovery_base import VariableRecoveryBase, VariableRecoveryStateBase
 from .engine_vex import SimEngineVRVEX
 from .engine_ail import SimEngineVRAIL
+import contextlib
 
 if TYPE_CHECKING:
     from angr.analyses.typehoon.typevars import TypeConstraint
@@ -83,7 +86,7 @@ class VariableRecoveryFastState(VariableRecoveryStateBase):
         return self.stack_region == other.stack_region and self.register_region == other.register_region
 
     def copy(self):
-        state = VariableRecoveryFastState(
+        return VariableRecoveryFastState(
             self.block_addr,
             self._analysis,
             self.arch,
@@ -100,11 +103,7 @@ class VariableRecoveryFastState(VariableRecoveryStateBase):
             ret_val_size=self.ret_val_size,
         )
 
-        return state
-
-    def merge(
-        self, others: tuple["VariableRecoveryFastState"], successor=None
-    ) -> tuple["VariableRecoveryFastState", bool]:
+    def merge(self, others: tuple[VariableRecoveryFastState], successor=None) -> tuple[VariableRecoveryFastState, bool]:
         """
         Merge two abstract states.
 
@@ -158,7 +157,7 @@ class VariableRecoveryFastState(VariableRecoveryStateBase):
             all_stack_addr_typevar_offsets.update(other.stack_offset_typevars)
         for offset in all_stack_addr_typevar_offsets:
             all_typevars = set()
-            for state in (self,) + others:
+            for state in (self, *others):
                 typevar = state.stack_offset_typevars.get(offset, None)
                 if typevar is not None:
                     all_typevars.add(typevar)
@@ -173,10 +172,9 @@ class VariableRecoveryFastState(VariableRecoveryStateBase):
 
         ret_val_size = self.ret_val_size
         for o in others:
-            if o.ret_val_size is not None:
-                if ret_val_size is None or o.ret_val_size > ret_val_size:
-                    ret_val_size = o.ret_val_size
-                    merge_occurred = True
+            if o.ret_val_size is not None and (ret_val_size is None or o.ret_val_size > ret_val_size):
+                ret_val_size = o.ret_val_size
+                merge_occurred = True
 
         # clean up
         self.phi_variables = {}
@@ -241,6 +239,8 @@ class VariableRecoveryFast(ForwardAnalysis, VariableRecoveryBase):  # pylint:dis
         func_args: list[SimVariable] | None = None,
         store_live_variables=False,
         unify_variables=True,
+        func_arg_vvars: dict[int, tuple[VirtualVariable, SimVariable]] | None = None,
+        vvar_to_vvar: dict[int, int] | None = None,
     ):
         if not isinstance(func, Function):
             func = self.kb.functions[func]
@@ -248,18 +248,16 @@ class VariableRecoveryFast(ForwardAnalysis, VariableRecoveryBase):  # pylint:dis
         call_info = defaultdict(list)
         for node_from, node_to, data in func_graph_with_calls.edges(data=True):
             if data.get("type", None) == "call" or data.get("outside", False):
-                try:
+                with contextlib.suppress(KeyError):
                     call_info[node_from.addr].append(self.kb.functions.get_by_addr(node_to.addr))
-                except KeyError:
-                    pass
 
         function_graph_visitor = visitors.FunctionGraphVisitor(func, graph=func_graph)
 
         # Make sure the function is not empty
         if not func.block_addrs_set or func.startpoint is None:
-            raise AngrVariableRecoveryError("Function %s is empty." % repr(func))
+            raise AngrVariableRecoveryError(f"Function {func!r} is empty.")
 
-        VariableRecoveryBase.__init__(self, func, max_iterations, store_live_variables)
+        VariableRecoveryBase.__init__(self, func, max_iterations, store_live_variables, vvar_to_vvar=vvar_to_vvar)
         ForwardAnalysis.__init__(
             self, order_jobs=True, allow_merging=True, allow_widening=False, graph_visitor=function_graph_visitor
         )
@@ -268,17 +266,20 @@ class VariableRecoveryFast(ForwardAnalysis, VariableRecoveryBase):  # pylint:dis
         self._job_ctr = 0
         self._track_sp = track_sp and self.project.arch.sp_offset is not None
         self._func_args = func_args
+        self._func_arg_vvars = func_arg_vvars
         self._unify_variables = unify_variables
 
-        self._ail_engine = SimEngineVRAIL(self.project, self.kb, call_info=call_info)
-        self._vex_engine = SimEngineVRVEX(self.project, self.kb, call_info=call_info)
+        self._ail_engine: SimEngineVRAIL = SimEngineVRAIL(
+            self.project, self.kb, call_info=call_info, vvar_to_vvar=self.vvar_to_vvar
+        )
+        self._vex_engine: SimEngineVRVEX = SimEngineVRVEX(self.project, self.kb, call_info=call_info)
 
         self._node_iterations = defaultdict(int)
 
         self._node_to_cc = {}
-        self.var_to_typevars: DefaultDict[SimVariable, set[TypeVariable]] = defaultdict(set)
+        self.var_to_typevars: defaultdict[SimVariable, set[TypeVariable]] = defaultdict(set)
         self.typevars = None
-        self.type_constraints: dict["TypeVariable", set["TypeConstraint"]] | None = None
+        self.type_constraints: dict[TypeVariable, set[TypeConstraint]] | None = None
         self.func_typevar = TypeVariable(name=func.name)
         self.delayed_type_constraints = None
         self.ret_val_size = None
@@ -377,7 +378,27 @@ class VariableRecoveryFast(ForwardAnalysis, VariableRecoveryBase):  # pylint:dis
             except angr.errors.SimMemoryMissingError:
                 state.register_region.store(t9_offset, claripy.BVV(node.addr, t9_size * 8))
 
-        if self._func_args:
+        if self._func_arg_vvars:
+            for arg_vvar, arg in self._func_arg_vvars.values():
+                if isinstance(arg, SimRegisterVariable):
+                    v = claripy.BVS("reg_arg", arg.bits)
+                    v = state.annotate_with_variables(v, [(0, arg)])
+                    arg_vvar_id = arg_vvar.varid
+                    if self.vvar_to_vvar:
+                        arg_vvar_id = self.vvar_to_vvar.get(arg_vvar_id, arg_vvar_id)
+                    self._ail_engine.vvar_region[arg_vvar_id] = v
+                    internal_manager.add_variable("register", arg.reg, arg)
+                elif isinstance(arg, SimStackVariable):
+                    v = claripy.BVS("stack_arg", arg.bits)
+                    v = state.annotate_with_variables(v, [(0, arg)])
+                    arg_vvar_id = arg_vvar.varid
+                    if self.vvar_to_vvar:
+                        arg_vvar_id = self.vvar_to_vvar.get(arg_vvar_id, arg_vvar_id)
+                    self._ail_engine.vvar_region[arg_vvar_id] = v
+                    internal_manager.add_variable("stack", arg.offset, arg)
+                else:
+                    raise TypeError(f"Unsupported function argument type {type(arg)}")
+        elif self._func_args:
             for arg in self._func_args:
                 if isinstance(arg, SimRegisterVariable):
                     v = claripy.BVS("reg_arg", arg.bits)
@@ -394,7 +415,7 @@ class VariableRecoveryFast(ForwardAnalysis, VariableRecoveryBase):  # pylint:dis
                     )
                     internal_manager.add_variable("stack", arg.offset, arg)
                 else:
-                    raise TypeError("Unsupported function argument type %s." % type(arg))
+                    raise TypeError(f"Unsupported function argument type {type(arg)}.")
 
         return state
 
@@ -443,9 +464,8 @@ class VariableRecoveryFast(ForwardAnalysis, VariableRecoveryBase):  # pylint:dis
 
         self._node_iterations[block_key] += 1
 
-        if state.ret_val_size is not None:
-            if self.ret_val_size is None or self.ret_val_size < state.ret_val_size:
-                self.ret_val_size = state.ret_val_size
+        if state.ret_val_size is not None and (self.ret_val_size is None or self.ret_val_size < state.ret_val_size):
+            self.ret_val_size = state.ret_val_size
 
         state.downsize()
         self._outstates[block_key] = state
@@ -479,7 +499,7 @@ class VariableRecoveryFast(ForwardAnalysis, VariableRecoveryBase):  # pylint:dis
         # unify type variables for global variables
         for var, typevars in self.var_to_typevars.items():
             if len(typevars) > 1 and isinstance(var, SimMemoryVariable) and not isinstance(var, SimStackVariable):
-                sorted_typevars = list(sorted(typevars, key=lambda x: str(x)))  # pylint:disable=unnecessary-lambda
+                sorted_typevars = sorted(typevars, key=lambda x: str(x))  # pylint:disable=unnecessary-lambda
                 for tv in sorted_typevars[1:]:
                     self.type_constraints[self.func_typevar].add(Equivalence(sorted_typevars[0], tv))
 
@@ -522,20 +542,21 @@ class VariableRecoveryFast(ForwardAnalysis, VariableRecoveryBase):  # pylint:dis
                         tmp0 = stmt0.tmp
                         tmp1 = stmt1.tmp
                         stmt2 = block.vex.statements[i + 2]
-                        if isinstance(stmt2, pyvex.IRStmt.WrTmp) and isinstance(stmt2.data, pyvex.IRExpr.Binop):
-                            if (
-                                isinstance(stmt2.data.args[0], pyvex.IRExpr.RdTmp)
-                                and isinstance(stmt2.data.args[1], pyvex.IRExpr.RdTmp)
-                                and {stmt2.data.args[0].tmp, stmt2.data.args[1].tmp} == {tmp0, tmp1}
-                                and vexop_to_simop(stmt2.data.op)._generic_name == "Xor"
-                            ):
-                                # found it!
-                                # make a copy so we don't trash the cached VEX IRSB
-                                block._vex = block.vex.copy()
-                                block.vex.statements[i] = pyvex.IRStmt.NoOp()
-                                block.vex.statements[i + 1] = pyvex.IRStmt.NoOp()
-                                zero = pyvex.IRExpr.Const(self._get_irconst(0, block.vex.tyenv.sizeof(tmp0)))
-                                block.vex.statements[i + 2] = pyvex.IRStmt.Put(zero, reg_offset)
+                        if (
+                            isinstance(stmt2, pyvex.IRStmt.WrTmp)
+                            and isinstance(stmt2.data, pyvex.IRExpr.Binop)
+                            and isinstance(stmt2.data.args[0], pyvex.IRExpr.RdTmp)
+                            and isinstance(stmt2.data.args[1], pyvex.IRExpr.RdTmp)
+                            and {stmt2.data.args[0].tmp, stmt2.data.args[1].tmp} == {tmp0, tmp1}
+                            and vexop_to_simop(stmt2.data.op)._generic_name == "Xor"
+                        ):
+                            # found it!
+                            # make a copy so we don't trash the cached VEX IRSB
+                            block._vex = block.vex.copy()
+                            block.vex.statements[i] = pyvex.IRStmt.NoOp()
+                            block.vex.statements[i + 1] = pyvex.IRStmt.NoOp()
+                            zero = pyvex.IRExpr.Const(self._get_irconst(0, block.vex.tyenv.sizeof(tmp0)))
+                            block.vex.statements[i + 2] = pyvex.IRStmt.Put(zero, reg_offset)
             i = next_i
         return block
 
@@ -573,12 +594,11 @@ class VariableRecoveryFast(ForwardAnalysis, VariableRecoveryBase):  # pylint:dis
 
             adjusted = False
 
-            if not adjusted:
-                # make a guess
-                # of course, this will fail miserably if the function called is not cdecl
-                if self.project.arch.call_pushes_ret:
-                    sp_v += self.project.arch.bytes
-                    adjusted = True
+            # make a guess
+            # of course, this will fail miserably if the function called is not cdecl
+            if not adjusted and self.project.arch.call_pushes_ret:
+                sp_v += self.project.arch.bytes
+                adjusted = True
 
             if adjusted:
                 state.register_region.store(self.project.arch.sp_offset, sp_v)

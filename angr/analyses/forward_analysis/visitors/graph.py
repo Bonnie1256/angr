@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import TypeVar, Generic
 from collections.abc import Collection, Iterator
 from collections import defaultdict
@@ -49,7 +50,7 @@ class GraphVisitor(Generic[NodeType]):
         :rtype:      list
         """
 
-        raise NotImplementedError()
+        raise NotImplementedError
 
     def predecessors(self, node: NodeType) -> list[NodeType]:
         """
@@ -59,7 +60,7 @@ class GraphVisitor(Generic[NodeType]):
         :return:     A list of predecessors.
         """
 
-        raise NotImplementedError()
+        raise NotImplementedError
 
     def sort_nodes(self, nodes: Collection[NodeType] | None = None) -> list[NodeType]:
         """
@@ -69,16 +70,16 @@ class GraphVisitor(Generic[NodeType]):
         :return:               A list of sorted nodes.
         """
 
-        raise NotImplementedError()
+        raise NotImplementedError
 
     def back_edges(self) -> list[tuple[NodeType, NodeType]]:
         """
-        Get a list of back edges. This function is optional. If not overriden, the traverser cannot achieve an optimal
+        Get a list of back edges. This function is optional. If not overridden, the traverser cannot achieve an optimal
         graph traversal order.
 
         :return:                A list of back edges (source -> destination).
         """
-        raise NotImplementedError()
+        raise NotImplementedError
 
     #
     # Public methods
@@ -201,10 +202,9 @@ class GraphVisitor(Generic[NodeType]):
 
         successors = self.successors(node)  # , skip_reached_fixedpoint=True)
 
-        if include_self:
-            if node not in self._nodes_set:
-                binary_insert(self._worklist, node, lambda elem: self._node_to_index[elem])
-                self._nodes_set.add(node)
+        if include_self and node not in self._nodes_set:
+            binary_insert(self._worklist, node, lambda elem: self._node_to_index[elem])
+            self._nodes_set.add(node)
 
         for succ in successors:
             if succ not in self._nodes_set:

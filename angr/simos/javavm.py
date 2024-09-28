@@ -1,14 +1,17 @@
+from __future__ import annotations
+
 import logging
 
-from angr import SIM_PROCEDURES, options
 from archinfo.arch_soot import ArchSoot, SootAddressDescriptor, SootAddressTerminator, SootArgument, SootNullConstant
 from claripy import BVS, BVV, StringS, StringV, FSORT_FLOAT, FSORT_DOUBLE, FPV, FPS
 from claripy.ast.fp import FP, fpToIEEEBV
 from claripy.ast.bv import BV
 
+from angr import SIM_PROCEDURES, options
+
 from ..calling_conventions import default_cc, SimCCSoot
 from ..engines.soot import SootMixin
-from ..engines.soot.expressions import SimSootExpr_NewArray  # , SimSootExpr_NewMultiArray
+from ..engines.soot.expressions import SimSootExpr_NewArray
 from ..engines.soot.values import (
     SimSootValue_ArrayRef,
     SimSootValue_StringRef,
@@ -105,11 +108,6 @@ class SimJavaVM(SimOS):
             kwargs["arch"] = self.arch
         if not kwargs.get("os_name", None):
             kwargs["os_name"] = self.name
-        # enable support for string analysis
-        add_options = kwargs.get("add_options", set())
-        add_options.add(options.STRINGS_ANALYSIS)
-        add_options.add(options.COMPOSITE_SOLVER)
-        kwargs["add_options"] = add_options
 
         if self.is_javavm_with_jni_support:
             # If the JNI support is enabled (i.e. JNI libs are loaded), the SimState
@@ -194,13 +192,13 @@ class SimJavaVM(SimOS):
         return state
 
     @staticmethod
-    def generate_symbolic_cmd_line_arg(state, max_length=1000):
+    def generate_symbolic_cmd_line_arg(state):
         """
         Generates a new symbolic cmd line argument string.
         :return: The string reference.
         """
         str_ref = SimSootValue_StringRef(state.memory.get_new_uuid())
-        str_sym = StringS("cmd_line_arg", max_length)
+        str_sym = StringS("cmd_line_arg")
         state.solver.add(str_sym != StringV(""))
         state.memory.store(str_ref, str_sym)
         return str_ref
@@ -227,62 +225,61 @@ class SimJavaVM(SimOS):
             cc.setup_callsite(state, ret_addr, args, kwargs.pop("prototype", None))
             return state
 
-        else:
-            # NATIVE CALLSITE
+        # NATIVE CALLSITE
 
-            # setup native return type
-            # TODO roll this into protytype
-            ret_type = kwargs.pop("ret_type")
-            native_ret_type = self.get_native_type(ret_type)
+        # setup native return type
+        # TODO roll this into protytype
+        ret_type = kwargs.pop("ret_type")
+        native_ret_type = self.get_native_type(ret_type)
 
-            # setup function prototype, so the SimCC know how to init the callsite
-            prototype = kwargs.pop("prototype", None)
-            if prototype is None:
-                arg_types = [self.get_native_type(arg.type) for arg in args]
-                prototype = SimTypeFunction(args=arg_types, returnty=native_ret_type)
-            native_cc = kwargs.pop("cc", None)
-            if native_cc is None:
-                native_cc = self.get_native_cc()
+        # setup function prototype, so the SimCC know how to init the callsite
+        prototype = kwargs.pop("prototype", None)
+        if prototype is None:
+            arg_types = [self.get_native_type(arg.type) for arg in args]
+            prototype = SimTypeFunction(args=arg_types, returnty=native_ret_type)
+        native_cc = kwargs.pop("cc", None)
+        if native_cc is None:
+            native_cc = self.get_native_cc()
 
-            # setup native argument values
-            native_arg_values = []
-            for arg, arg_ty in zip(args, prototype.args):
-                if arg.type in ArchSoot.primitive_types or arg.type == "JNIEnv":
-                    # the value of primitive types and the JNIEnv pointer
-                    # are just getting copied into the native memory
-                    native_arg_value = arg.value
-                    if self.arch.bits == 32 and arg.type == "long":
-                        # On 32 bit architecture, long values (w/ 64 bit) are copied
-                        # as two 32 bit integer
-                        # TODO I _think_ all this logic can go away as long as the cc knows how to store large values
-                        # TODO this has been mostly implemented 11 Dec 2021
-                        # unfortunately no test cases hit this branch so I don't wanna touch it :(
-                        upper = native_arg_value.get_bytes(0, 4)
-                        lower = native_arg_value.get_bytes(4, 4)
-                        idx = args.index(arg)
-                        args = args[:idx] + (SootArgument(upper, "int"), SootArgument(lower, "int")) + args[idx + 1 :]
-                        native_arg_values += [upper, lower]
-                        continue
-                    if type(arg.value) is BV and len(arg.value) > arg_ty.size:
-                        # hack??? all small primitives are passed around as 32bit but cc won't like that
-                        native_arg_value = native_arg_value[arg_ty.size - 1 : 0]
-                else:
-                    # argument has a relative type
-                    # => map Java reference to an opaque reference, which the native code
-                    #    can use to access the Java object through the JNI interface
-                    native_arg_value = state.jni_references.create_new_reference(obj=arg.value)
-                native_arg_values += [native_arg_value]
+        # setup native argument values
+        native_arg_values = []
+        for arg, arg_ty in zip(args, prototype.args):
+            if arg.type in ArchSoot.primitive_types or arg.type == "JNIEnv":
+                # the value of primitive types and the JNIEnv pointer
+                # are just getting copied into the native memory
+                native_arg_value = arg.value
+                if self.arch.bits == 32 and arg.type == "long":
+                    # On 32 bit architecture, long values (w/ 64 bit) are copied
+                    # as two 32 bit integer
+                    # TODO I _think_ all this logic can go away as long as the cc knows how to store large values
+                    # TODO this has been mostly implemented 11 Dec 2021
+                    # unfortunately no test cases hit this branch so I don't wanna touch it :(
+                    upper = native_arg_value.get_bytes(0, 4)
+                    lower = native_arg_value.get_bytes(4, 4)
+                    idx = args.index(arg)
+                    args = args[:idx] + (SootArgument(upper, "int"), SootArgument(lower, "int")) + args[idx + 1 :]
+                    native_arg_values += [upper, lower]
+                    continue
+                if type(arg.value) is BV and len(arg.value) > arg_ty.size:
+                    # hack??? all small primitives are passed around as 32bit but cc won't like that
+                    native_arg_value = native_arg_value[arg_ty.size - 1 : 0]
+            else:
+                # argument has a relative type
+                # => map Java reference to an opaque reference, which the native code
+                #    can use to access the Java object through the JNI interface
+                native_arg_value = state.jni_references.create_new_reference(obj=arg.value)
+            native_arg_values += [native_arg_value]
 
-            # setup native invoke state
-            return self.native_simos.state_call(
-                addr,
-                *native_arg_values,
-                base_state=state,
-                ret_addr=self.native_return_hook_addr,
-                cc=native_cc,
-                prototype=prototype,
-                **kwargs,
-            )
+        # setup native invoke state
+        return self.native_simos.state_call(
+            addr,
+            *native_arg_values,
+            base_state=state,
+            ret_addr=self.native_return_hook_addr,
+            cc=native_cc,
+            prototype=prototype,
+            **kwargs,
+        )
 
     #
     # MISC
@@ -313,23 +310,22 @@ class SimJavaVM(SimOS):
         if type_ == "double":
             return FPS(f"default_value_{type_}", FSORT_DOUBLE)
         if type_ == "java.lang.String":
-            return SimSootValue_StringRef.new_string(state, StringS(f"default_value_{type_}", 1000))
+            return SimSootValue_StringRef.new_string(state, StringS(f"default_value_{type_}"))
         if type_.endswith("[][]"):
             raise NotImplementedError
         if type_.endswith("[]"):
-            array = SimSootExpr_NewArray.new_array(state, type_[:-2], BVV(2, 32))
-            return array
+            return SimSootExpr_NewArray.new_array(state, type_[:-2], BVV(2, 32))
         return SimSootValue_ThisRef.new_object(state, type_, symbolic=True, init_object=False)
 
     @staticmethod
     def _get_default_concrete_value_by_type(type_, state=None):  # pylint: disable=unused-argument
         if type_ in ["byte", "char", "short", "int", "boolean"]:
             return BVV(0, 32)
-        elif type_ == "long":
+        if type_ == "long":
             return BVV(0, 64)
-        elif type_ == "float":
+        if type_ == "float":
             return FPV(0, FSORT_FLOAT)
-        elif type_ == "double":
+        if type_ == "double":
             return FPV(0, FSORT_DOUBLE)
         # not a primitive type
         # => treat it as a reference
@@ -338,7 +334,7 @@ class SimJavaVM(SimOS):
     @staticmethod
     def cast_primitive(state, value, to_type):
         """
-        Cast the value of primtive types.
+        Cast the value of primitive types.
 
         :param value:       Bitvector storing the primitive value.
         :param to_type:     Name of the targeted type.
@@ -352,29 +348,28 @@ class SimJavaVM(SimOS):
             sort = FSORT_FLOAT if to_type == "float" else FSORT_DOUBLE
             return FPV(value, sort)
 
-        elif to_type == "int" and isinstance(value, FP):
+        if to_type == "int" and isinstance(value, FP):
             # TODO fix fpToIEEEBV in claripty
             l.warning("Converting FP to BV might provide incorrect results.")
             return fpToIEEEBV(value)[63:32]
 
-        elif to_type == "long" and isinstance(value, FP):
+        if to_type == "long" and isinstance(value, FP):
             # TODO fix fpToIEEEBV in claripty
             l.warning("Converting FP to BV might provide incorrect results.")
             return fpToIEEEBV(value)
 
-        else:
-            # lookup the type size and extract value
-            value_size = ArchSoot.sizeof[to_type]
-            value_extracted = value.reversed.get_bytes(index=0, size=value_size // 8).reversed
+        # lookup the type size and extract value
+        value_size = ArchSoot.sizeof[to_type]
+        value_extracted = value.reversed.get_bytes(index=0, size=value_size // 8).reversed
 
-            # determine size of Soot bitvector and resize bitvector
-            # Note: smaller types than int's are stored in a 32-bit BV
-            value_soot_size = value_size if value_size >= 32 else 32
-            if to_type in ["char", "boolean"]:
-                # unsigned extend
-                return value_extracted.zero_extend(value_soot_size - value_extracted.size())
-            # signed extend
-            return value_extracted.sign_extend(value_soot_size - value_extracted.size())
+        # determine size of Soot bitvector and resize bitvector
+        # Note: smaller types than int's are stored in a 32-bit BV
+        value_soot_size = max(value_size, 32)
+        if to_type in ["char", "boolean"]:
+            # unsigned extend
+            return value_extracted.zero_extend(value_soot_size - value_extracted.size())
+        # signed extend
+        return value_extracted.sign_extend(value_soot_size - value_extracted.size())
 
     @staticmethod
     def init_static_field(state, field_class_name, field_name, field_type):
@@ -434,15 +429,9 @@ class SimJavaVM(SimOS):
 
         :return: A SymTypeReg with the JNI size of the given type.
         """
-        if java_type in ArchSoot.sizeof.keys():
-            jni_type_size = ArchSoot.sizeof[java_type]
-        else:
-            # if it's not a primitive type, we treat it as a reference
-            jni_type_size = self.native_simos.arch.bits
+        # if it's not a primitive type, we treat it as a reference
+        jni_type_size = ArchSoot.sizeof.get(java_type, self.native_simos.arch.bits)
         return SimTypeNum(size=jni_type_size)
-
-    def get_method_native_type(self, method):
-        return SimTypeFunction
 
     @property
     def native_arch(self):

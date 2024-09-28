@@ -1,3 +1,4 @@
+from __future__ import annotations
 import logging
 import weakref
 import itertools
@@ -52,8 +53,7 @@ class StateHierarchy:
             self._weakref_cache[id(obj)] = ref
             self._reverse_weakref_cache[ref] = id(obj)
             return ref
-        else:
-            return self._weakref_cache[id(obj)]
+        return self._weakref_cache[id(obj)]
 
     def dead_ref(self, ref):
         if self._defer_cleanup:
@@ -195,7 +195,7 @@ class StateHierarchy:
                 root = lineage[bad]
                 l.debug("... returning %d (%s)", bad, root)
                 return root
-            elif lineage[cur]().reachable():
+            if lineage[cur]().reachable():
                 l.debug("... %d is reachable", cur)
                 good = cur
             else:
@@ -213,7 +213,7 @@ class StateHierarchy:
                 n()._satisfiable = False
                 try:
                     if n().state is not None:
-                        n().state.add_constraints(claripy.false)
+                        n().state.add_constraints(claripy.false())
                 except ReferenceError:
                     pass
             self._graph.remove_nodes_from(all_children)

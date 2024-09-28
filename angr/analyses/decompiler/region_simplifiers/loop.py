@@ -1,4 +1,5 @@
 # pylint:disable=unused-argument,arguments-differ
+from __future__ import annotations
 from collections import defaultdict
 
 import ailment
@@ -14,7 +15,7 @@ from ..structuring.structurer_nodes import (
     ContinueNode,
     CascadingConditionNode,
 )
-from ..utils import is_statement_terminating
+from ..utils import is_statement_terminating, has_nonlabel_nonphi_statements
 
 
 class LoopSimplifier(SequenceWalker):
@@ -82,14 +83,15 @@ class LoopSimplifier(SequenceWalker):
 
         # find for-loop iterators
         if (
-            node.sort == "while"
-            and self.continue_preludes[node]
-            and (
-                (node.condition is not None and not isinstance(node.condition, ailment.Expr.Const))
-                or len(self.continue_preludes[node]) > 1
+            (
+                node.sort == "while"
+                and self.continue_preludes[node]
+                and (
+                    (node.condition is not None and not isinstance(node.condition, ailment.Expr.Const))
+                    or len(self.continue_preludes[node]) > 1
+                )
             )
-        ):
-            if (
+            and (
                 all(block.statements for block in self.continue_preludes[node])
                 and all(
                     not self._control_transferring_statement(block.statements[-1])
@@ -99,11 +101,23 @@ class LoopSimplifier(SequenceWalker):
                     block.statements[-1] == self.continue_preludes[node][0].statements[-1]
                     for block in self.continue_preludes[node]
                 )
-            ):
-                node.sort = "for"
-                node.iterator = self.continue_preludes[node][0].statements[-1]
-                for block in self.continue_preludes[node]:
-                    block.statements = block.statements[:-1]
+            )
+            and (
+                all(has_nonlabel_nonphi_statements(block) for block in self.continue_preludes[node])
+                and all(
+                    not self._control_transferring_statement(block.statements[-1])
+                    for block in self.continue_preludes[node]
+                )
+                and all(
+                    block.statements[-1] == self.continue_preludes[node][0].statements[-1]
+                    for block in self.continue_preludes[node]
+                )
+            )
+        ):
+            node.sort = "for"
+            node.iterator = self.continue_preludes[node][0].statements[-1]
+            for block in self.continue_preludes[node]:
+                block.statements = block.statements[:-1]
 
         # find for-loop initializers
         if isinstance(predecessor, MultiNode):

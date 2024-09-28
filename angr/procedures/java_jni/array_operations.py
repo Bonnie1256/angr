@@ -1,4 +1,7 @@
+from __future__ import annotations
 import logging
+
+import claripy
 
 from . import JNISimProcedure
 from ...engines.soot.expressions import SimSootExpr_NewArray
@@ -239,7 +242,7 @@ class GetArrayRegion(JNISimProcedure):
         # - start_idx <= last_idx < array_size
         #   with last_idx := start_idx+length-1
         # - 0 <= length <= array_size
-        range_constraints = state.solver.And(
+        range_constraints = claripy.And(
             start_idx.SGE(0),
             start_idx.SLT(array.size),
             array.size.SGT(start_idx + length - 1),

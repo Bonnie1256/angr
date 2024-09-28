@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=59", "wheel", "pyvex==9.2.115.dev0", "unicorn==2.0.1.post1"]
+requires = ["setuptools>=59", "wheel", "pyvex==9.2.120.dev0", "unicorn==2.0.1.post1"]
 build-backend = "setuptools.build_meta"
 
 [tool.black]
@@ -19,11 +19,24 @@ exclude = [
 ]
 
 [tool.ruff.lint]
+extend-select = [
+	"B",
+	"C4",
+	"FURB",
+	"I002",
+	"PIE",
+	"RET",
+	"RSE",
+	"RUF",
+	"SIM",
+	"UP",
+]
 extend-ignore = [
+	"B007", # Unused loop control variable
+	"B011", # Asserts
 	"E402", # Bottom imports
-	"E721", # Type comparisons
 	"E741", # Variable names
-
+	"RUF012", # FIXME: Annotate class variables
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -42,3 +55,6 @@ extend-ignore = [
 	"F401",
 	"F403",
 ]
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]

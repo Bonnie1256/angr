@@ -1,4 +1,5 @@
 # pylint:disable=no-self-use,isinstance-second-argument-not-valid-type,unused-argument
+from __future__ import annotations
 from typing import Any
 import struct
 import re
@@ -15,6 +16,7 @@ from ...engines.vex.claripy.irop import UnsupportedIROpError, SimOperationError,
 from ...code_location import CodeLocation
 from ...utils.constants import DEFAULT_STATEMENT
 from ..engine import SimEngine
+import contextlib
 
 
 class SimEngineLightMixin:
@@ -43,7 +45,7 @@ class SimEngineLightMixin:
         :param size:    The size (in bits) of the TOP value.
         :return:        A TOP value.
         """
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @staticmethod
     def sp_offset(bits: int, offset: int):
@@ -66,17 +68,17 @@ class SimEngineLightMixin:
             # Local variable
             if spoffset_expr.op == "BVS":
                 return 0
-            elif spoffset_expr.op == "__add__":
+            if spoffset_expr.op == "__add__":
                 if len(spoffset_expr.args) == 1:
                     # Unexpected but fine
                     return 0
-                elif isinstance(spoffset_expr.args[1], claripy.ast.Base) and spoffset_expr.args[1].op == "BVV":
+                if isinstance(spoffset_expr.args[1], claripy.ast.Base) and spoffset_expr.args[1].op == "BVV":
                     return spoffset_expr.args[1].args[0]
             elif spoffset_expr.op == "__sub__":
                 if len(spoffset_expr.args) == 1:
                     # Unexpected but fine
                     return 0
-                elif isinstance(spoffset_expr.args[1], claripy.ast.Base) and spoffset_expr.args[1].op == "BVV":
+                if isinstance(spoffset_expr.args[1], claripy.ast.Base) and spoffset_expr.args[1].op == "BVV":
                     return -spoffset_expr.args[1].args[0] & ((1 << spoffset_expr.size()) - 1)
         return None
 
@@ -112,7 +114,7 @@ class SimEngineLight(
         self._process(state, None, block=kwargs.pop("block", None), whitelist=kwargs.pop("whitelist", None))
 
     def _process(self, new_state, successors, *args, **kwargs):
-        raise NotImplementedError()
+        raise NotImplementedError
 
     def _check(self, state, *args, **kwargs):
         return True
@@ -195,12 +197,11 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
     #
 
     def _handle_Stmt(self, stmt):
-        handler = "_handle_%s" % type(stmt).__name__
+        handler = f"_handle_{type(stmt).__name__}"
         if hasattr(self, handler):
             getattr(self, handler)(stmt)
-        elif type(stmt).__name__ not in ("IMark", "AbiHint"):
-            if self.l is not None:
-                self.l.error("Unsupported statement type %s.", type(stmt).__name__)
+        elif type(stmt).__name__ not in ("IMark", "AbiHint") and self.l is not None:
+            self.l.error("Unsupported statement type %s.", type(stmt).__name__)
 
     # synchronize with function _handle_WrTmpData()
     def _handle_WrTmp(self, stmt):
@@ -237,18 +238,16 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
     #
 
     def _expr(self, expr):
-        handler = "_handle_%s" % type(expr).__name__
+        handler = f"_handle_{type(expr).__name__}"
         if hasattr(self, handler):
             return getattr(self, handler)(expr)
-        elif self.l is not None:
+        if self.l is not None:
             self.l.error("Unsupported expression type %s.", type(expr).__name__)
         return None
 
     def _handle_Triop(self, expr: pyvex.IRExpr.Triop):  # pylint: disable=useless-return
         handler = None
-        if expr.op.startswith("Iop_AddF"):
-            handler = "_handle_AddF"
-        elif expr.op.startswith("Iop_SubF"):
+        if expr.op.startswith("Iop_AddF") or expr.op.startswith("Iop_SubF"):
             handler = "_handle_AddF"
         elif expr.op.startswith("Iop_MulF"):
             handler = "_handle_MulF"
@@ -319,20 +318,17 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
         cond = self._expr(expr.cond)
         if cond is True:
             return self._expr(expr.iftrue)
-        elif cond is False:
+        if cond is False:
             return self._expr(expr.iffalse)
-        else:
-            return None
+        return None
 
     def _handle_Unop(self, expr):
         handler = None
 
         # All conversions are handled by the Conversion handler
         simop = None
-        try:
+        with contextlib.suppress(UnsupportedIROpError, SimOperationError):
             simop = vexop_to_simop(expr.op)
-        except (UnsupportedIROpError, SimOperationError):
-            pass
 
         if simop is not None and simop.op_attrs.get("conversion", None):
             handler = "_handle_Conversion"
@@ -352,10 +348,9 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
 
         if handler is not None and hasattr(self, handler):
             return getattr(self, handler)(expr)
-        else:
-            if self.l is not None:
-                self.l.error("Unsupported Unop %s.", expr.op)
-            return None
+        if self.l is not None:
+            self.l.error("Unsupported Unop %s.", expr.op)
+        return None
 
     def _handle_Binop(self, expr: pyvex.IRExpr.Binop):
         handler = None
@@ -424,7 +419,7 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
         vector_size, vector_count = None, None
         if handler is not None:
             # vector information
-            m = re.match(r"Iop_[^\d]+(\d+)U{0,1}x(\d+)", expr.op)
+            m = re.match(r"Iop_[^\d]+(\d+)[SU]{0,1}x(\d+)", expr.op)
             if m is not None:
                 vector_size = int(m.group(1))
                 vector_count = int(m.group(2))
@@ -434,16 +429,15 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
             if vector_size is not None and vector_count is not None:
                 return getattr(self, handler)(expr, vector_size, vector_count)
             return getattr(self, handler)(expr)
-        else:
-            if once(expr.op) and self.l is not None:
-                self.l.warning("Unsupported Binop %s.", expr.op)
+        if once(expr.op) and self.l is not None:
+            self.l.warning("Unsupported Binop %s.", expr.op)
 
         return None
 
     def _handle_CCall(self, expr):  # pylint:disable=useless-return
         if self.l is not None:
             self.l.warning("Unsupported expression type CCall with callee %s.", str(expr.cee))
-        return None
+        return
 
     #
     # Unary operation handlers
@@ -479,11 +473,10 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
             if expr_.size() > to_size:
                 # truncation
                 return expr_[to_size - 1 : 0]
-            elif expr_.size() < to_size:
+            if expr_.size() < to_size:
                 # extension
                 return claripy.ZeroExt(to_size - expr_.size(), expr_)
-            else:
-                return expr_
+            return expr_
 
         return self._top(to_size)
 
@@ -622,14 +615,13 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
             return claripy.Concat(
                 claripy.Extract(remainder_size - 1, 0, remainder), claripy.Extract(quotient_size - 1, 0, quotient)
             )
-        else:
-            quotient = expr_0 // claripy.ZeroExt(from_size - to_size, expr_1)
-            remainder = expr_0 % claripy.ZeroExt(from_size - to_size, expr_1)
-            quotient_size = to_size
-            remainder_size = to_size
-            return claripy.Concat(
-                claripy.Extract(remainder_size - 1, 0, remainder), claripy.Extract(quotient_size - 1, 0, quotient)
-            )
+        quotient = expr_0 // claripy.ZeroExt(from_size - to_size, expr_1)
+        remainder = expr_0 % claripy.ZeroExt(from_size - to_size, expr_1)
+        quotient_size = to_size
+        remainder_size = to_size
+        return claripy.Concat(
+            claripy.Extract(remainder_size - 1, 0, remainder), claripy.Extract(quotient_size - 1, 0, quotient)
+        )
 
     def _handle_Div(self, expr):
         args, r = self._binop_get_args(expr)
@@ -865,7 +857,9 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
         self.tmps = {}
         self.block: ailment.Block = block
         self.state = state
-        self.arch = state.arch
+        if self.arch is None:
+            # we only access state.arch if the arch of this engine itself is not previously configured
+            self.arch = state.arch
 
         self._process_Stmt(whitelist=whitelist)
 
@@ -893,12 +887,12 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
             expr_type_name += "Expr"
 
         h = None
-        handler = "_handle_%s" % expr_type_name
+        handler = f"_handle_{expr_type_name}"
         if hasattr(self, handler):
             h = getattr(self, handler)
 
         if h is None:
-            handler = "_ail_handle_%s" % expr_type_name
+            handler = f"_ail_handle_{expr_type_name}"
             if hasattr(self, handler):
                 h = getattr(self, handler)
 
@@ -926,31 +920,33 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
     #
 
     def _handle_Stmt(self, stmt):
-        handler = "_handle_%s" % type(stmt).__name__
+        handler = f"_handle_{type(stmt).__name__}"
         if hasattr(self, handler):
-            getattr(self, handler)(stmt)
-            return
+            return getattr(self, handler)(stmt)
 
         # compatibility
-        old_handler = "_ail_handle_%s" % type(stmt).__name__
+        old_handler = f"_ail_handle_{type(stmt).__name__}"
         if hasattr(self, old_handler):
-            getattr(self, old_handler)(stmt)
-            return
+            return getattr(self, old_handler)(stmt)
 
         if self.l is not None:
             self.l.warning("Unsupported statement type %s.", type(stmt).__name__)
+        return None
+
+    def _ail_handle_Assignment(self, stmt):
+        pass
 
     def _ail_handle_Label(self, stmt):
         pass
 
     def _ail_handle_Jump(self, stmt):
-        raise NotImplementedError("Please implement the Jump handler with your own logic.")
+        pass
 
     def _ail_handle_Call(self, stmt):
-        raise NotImplementedError("Please implement the Call handler with your own logic.")
+        pass
 
     def _ail_handle_Return(self, stmt):
-        raise NotImplementedError("Please implement the Return handler with your own logic.")
+        pass
 
     #
     # Expression handlers
@@ -962,6 +958,9 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
     def _ail_handle_Const(self, expr):  # pylint:disable=no-self-use
         return expr.value
 
+    def _ail_handle_StackBaseOffset(self, expr: ailment.Expr.StackBaseOffset):
+        return expr
+
     def _ail_handle_Tmp(self, expr):
         tmp_idx = expr.tmp_idx
 
@@ -970,11 +969,13 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
         except KeyError:
             return None
 
-    def _ail_handle_Load(self, expr):
-        raise NotImplementedError("Please implement the Load handler with your own logic.")
+    def _ail_handle_Load(self, expr: ailment.Expr.Load):
+        self._expr(expr.addr)
+        return expr
 
-    def _ail_handle_CallExpr(self, expr):
-        raise NotImplementedError("Please implement the CallExpr handler with your own logic.")
+    def _ail_handle_CallExpr(self, expr: ailment.Stmt.Call):
+        self._expr(expr.target)
+        return expr
 
     def _ail_handle_Reinterpret(self, expr: ailment.Expr.Reinterpret):
         arg = self._expr(expr.operand)
@@ -984,9 +985,8 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
         ):
             # int -> float
             b = struct.pack("<I", arg)
-            f = struct.unpack("<f", b)[0]
-            return f
-        elif (
+            return struct.unpack("<f", b)[0]
+        if (
             isinstance(arg, float)
             and expr.from_bits == 32
             and expr.from_type == "F"
@@ -995,8 +995,7 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
         ):
             # float -> int
             b = struct.pack("<f", arg)
-            v = struct.unpack("<I", b)[0]
-            return v
+            return struct.unpack("<I", b)[0]
 
         return expr
 
@@ -1005,7 +1004,7 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
         try:
             handler = getattr(self, handler_name)
         except AttributeError:
-            handler_name = "_ail_handle_%s" % expr.op
+            handler_name = f"_ail_handle_{expr.op}"
             try:
                 handler = getattr(self, handler_name)
             except AttributeError:
@@ -1020,7 +1019,7 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
         try:
             handler = getattr(self, handler_name)
         except AttributeError:
-            handler_name = "_ail_handle_%s" % expr.op
+            handler_name = f"_ail_handle_{expr.op}"
             try:
                 handler = getattr(self, handler_name)
             except AttributeError:
@@ -1035,7 +1034,7 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
         try:
             handler = getattr(self, handler_name)
         except AttributeError:
-            handler_name = "_ail_handle_%s" % expr.op
+            handler_name = f"_ail_handle_{expr.op}"
             try:
                 handler = getattr(self, handler_name)
             except AttributeError:
@@ -1132,14 +1131,8 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
     def _ail_handle_Sub(self, expr):
         arg0, arg1 = expr.operands
 
-        if not isinstance(arg0, claripy.ast.Base):
-            expr_0 = self._expr(arg0)
-        else:
-            expr_0 = arg0
-        if not isinstance(arg1, claripy.ast.Base):
-            expr_1 = self._expr(arg1)
-        else:
-            expr_1 = self._expr(arg1)
+        expr_0 = self._expr(arg0) if not isinstance(arg0, claripy.ast.Base) else arg0
+        expr_1 = self._expr(arg1) if not isinstance(arg1, claripy.ast.Base) else self._expr(arg1)
 
         if expr_0 is None:
             expr_0 = arg0
@@ -1347,12 +1340,8 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
         if expr_1 is None:
             expr_1 = arg1
 
-        try:
-            if isinstance(expr_1, claripy.ast.BV) and expr_1.concrete:
-                return expr_0 << expr_1.concrete_value
-        except TypeError:
-            pass
-
+        if isinstance(expr_0, claripy.ast.BV) and isinstance(expr_1, claripy.ast.BV) and expr_1.concrete:
+            return expr_0 << expr_1.concrete_value
         return ailment.Expr.BinaryOp(expr.idx, "Shl", [expr_0, expr_1], expr.signed, **expr.tags)
 
     def _ail_handle_Sal(self, expr):
@@ -1392,10 +1381,9 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
         if expr_1 is None:
             expr_1 = arg1
 
-        try:
-            return expr_0 >> expr_1
-        except TypeError:
-            return ailment.Expr.BinaryOp(expr.idx, "Sar", [expr_0, expr_1], expr.signed, **expr.tags)
+        if isinstance(expr_0, claripy.ast.Bits) and isinstance(expr_1, claripy.ast.Bits) and expr_1.concrete:
+            return expr_0 >> expr_1.concrete_value
+        return ailment.Expr.BinaryOp(expr.idx, "Sar", [expr_0, expr_1], expr.signed, **expr.tags)
 
     def _ail_handle_Concat(self, expr):
         arg0, arg1 = expr.operands
@@ -1415,9 +1403,8 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
 
     def _ail_handle_Convert(self, expr):
         data = self._expr(expr.operand)
-        if data is not None:
-            if type(data) is int:
-                return data
+        if data is not None and type(data) is int:
+            return data
         return None
 
     def _ail_handle_Not(self, expr):

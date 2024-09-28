@@ -1,11 +1,14 @@
 # ruff: noqa: F401
+from __future__ import annotations
 import functools
 import sys
 import contextlib
 from collections import defaultdict
 from inspect import Signature
-from typing import TYPE_CHECKING, TypeVar, Type, Generic, Optional
+from typing import TYPE_CHECKING, TypeVar, Generic, cast
 from collections.abc import Callable
+from types import NoneType
+from itertools import chain
 
 import logging
 import time
@@ -15,6 +18,7 @@ from rich import progress
 
 from ..misc.plugins import PluginVendor, VendorPreset
 from ..misc.ux import deprecated
+from ..misc import telemetry
 
 if TYPE_CHECKING:
     from ..knowledge_base import KnowledgeBase
@@ -54,6 +58,7 @@ if TYPE_CHECKING:
     AnalysisParams = ParamSpec("AnalysisParams")
 
 l = logging.getLogger(name=__name__)
+t = telemetry.get_tracer(name=__name__)
 
 
 class AnalysisLogEntry:
@@ -88,14 +93,13 @@ class AnalysisLogEntry:
                 msg_str = msg_str[:66] + "..."
                 if msg_str[0] in ('"', "'"):
                     msg_str += msg_str[0]
-            return "<AnalysisLogEntry %s>" % msg_str
-        else:
-            msg_str = repr(self.message)
-            if len(msg_str) > 40:
-                msg_str = msg_str[:36] + "..."
-                if msg_str[0] in ('"', "'"):
-                    msg_str += msg_str[0]
-            return f"<AnalysisLogEntry {msg_str} with {self.exc_type.__name__}: {self.exc_value}>"
+            return f"<AnalysisLogEntry {msg_str}>"
+        msg_str = repr(self.message)
+        if len(msg_str) > 40:
+            msg_str = msg_str[:36] + "..."
+            if msg_str[0] in ('"', "'"):
+                msg_str += msg_str[0]
+        return f"<AnalysisLogEntry {msg_str} with {self.exc_type.__name__}: {self.exc_value}>"
 
 
 A = TypeVar("A", bound="Analysis")
@@ -114,7 +118,7 @@ class AnalysesHub(PluginVendor[A]):
     def reload_analyses(self):  # pylint: disable=no-self-use
         return
 
-    def _init_plugin(self, plugin_cls: type[A]) -> "AnalysisFactory[A]":
+    def _init_plugin(self, plugin_cls: type[A]) -> AnalysisFactory[A]:
         return AnalysisFactory(self.project, plugin_cls)
 
     def __getstate__(self):
@@ -125,42 +129,42 @@ class AnalysesHub(PluginVendor[A]):
         s, self.project = sd
         super().__setstate__(s)
 
-    def __getitem__(self, plugin_cls: type[A]) -> "AnalysisFactory[A]":
+    def __getitem__(self, plugin_cls: type[A]) -> AnalysisFactory[A]:
         return AnalysisFactory(self.project, plugin_cls)
 
 
 class KnownAnalysesPlugin(typing.Protocol):
-    Identifier: "Type[Identifier]"
-    CalleeCleanupFinder: "Type[CalleeCleanupFinder]"
-    VSA_DDG: "Type[VSA_DDG]"
-    CDG: "Type[CDG]"
-    BinDiff: "Type[BinDiff]"
-    CFGEmulated: "Type[CFGEmulated]"
-    CFB: "Type[CFBlanket]"
-    CFBlanket: "Type[CFBlanket]"
-    CFG: "Type[CFG]"
-    CFGFast: "Type[CFGFast]"
-    StaticHooker: "Type[StaticHooker]"
-    DDG: "Type[DDG]"
-    CongruencyCheck: "Type[CongruencyCheck]"
-    Reassembler: "Type[Reassembler]"
-    BackwardSlice: "Type[BackwardSlice]"
-    BinaryOptimizer: "Type[BinaryOptimizer]"
-    VFG: "Type[VFG]"
-    LoopFinder: "Type[LoopFinder]"
-    Disassembly: "Type[Disassembly]"
-    Veritesting: "Type[Veritesting]"
-    CodeTagging: "Type[CodeTagging]"
-    BoyScout: "Type[BoyScout]"
-    VariableRecoveryFast: "Type[VariableRecoveryFast]"
-    VariableRecovery: "Type[VariableRecovery]"
-    ReachingDefinitions: "Type[ReachingDefinitionsAnalysis]"
-    CompleteCallingConventions: "Type[CompleteCallingConventionsAnalysis]"
-    Clinic: "Type[Clinic]"
-    Propagator: "Type[PropagatorAnalysis]"
-    CallingConvention: "Type[CallingConventionAnalysis]"
-    Decompiler: "Type[Decompiler]"
-    XRefs: "Type[XRefsAnalysis]"
+    Identifier: type[Identifier]
+    CalleeCleanupFinder: type[CalleeCleanupFinder]
+    VSA_DDG: type[VSA_DDG]
+    CDG: type[CDG]
+    BinDiff: type[BinDiff]
+    CFGEmulated: type[CFGEmulated]
+    CFB: type[CFBlanket]
+    CFBlanket: type[CFBlanket]
+    CFG: type[CFG]
+    CFGFast: type[CFGFast]
+    StaticHooker: type[StaticHooker]
+    DDG: type[DDG]
+    CongruencyCheck: type[CongruencyCheck]
+    Reassembler: type[Reassembler]
+    BackwardSlice: type[BackwardSlice]
+    BinaryOptimizer: type[BinaryOptimizer]
+    VFG: type[VFG]
+    LoopFinder: type[LoopFinder]
+    Disassembly: type[Disassembly]
+    Veritesting: type[Veritesting]
+    CodeTagging: type[CodeTagging]
+    BoyScout: type[BoyScout]
+    VariableRecoveryFast: type[VariableRecoveryFast]
+    VariableRecovery: type[VariableRecovery]
+    ReachingDefinitions: type[ReachingDefinitionsAnalysis]
+    CompleteCallingConventions: type[CompleteCallingConventionsAnalysis]
+    Clinic: type[Clinic]
+    Propagator: type[PropagatorAnalysis]
+    CallingConvention: type[CallingConventionAnalysis]
+    Decompiler: type[Decompiler]
+    XRefs: type[XRefsAnalysis]
 
 
 class AnalysesHubWithDefault(AnalysesHub, KnownAnalysesPlugin):
@@ -170,7 +174,7 @@ class AnalysesHubWithDefault(AnalysesHub, KnownAnalysesPlugin):
 
 
 class AnalysisFactory(Generic[A]):
-    def __init__(self, project: "Project", analysis_cls: type[A]):
+    def __init__(self, project: Project, analysis_cls: type[A]):
         self._project = project
         self._analysis_cls = analysis_cls
         self.__doc__ = ""
@@ -181,12 +185,50 @@ class AnalysisFactory(Generic[A]):
     def prep(
         self,
         fail_fast=False,
-        kb: Optional["KnowledgeBase"] = None,
+        kb: KnowledgeBase | None = None,
         progress_callback: Callable | None = None,
         show_progressbar: bool = False,
     ) -> type[A]:
         @functools.wraps(self._analysis_cls.__init__)
+        @t.start_as_current_span(self._analysis_cls.__name__)
         def wrapper(*args, **kwargs):
+            span = telemetry.get_current_span()
+            sig = cast(Signature, self.__call__.__func__.__signature__)
+            bound = sig.bind(None, *args, **kwargs)
+            for name, val in chain(bound.arguments.items(), bound.arguments.get("kwargs", {}).items()):
+                if name in ("kwargs", "self"):
+                    continue
+                if isinstance(val, (str, bytes, bool, int, float, NoneType)):
+                    if val is None:
+                        span.set_attribute(f"arg.{name}.is_none", True)
+                    else:
+                        span.set_attribute(f"arg.{name}", val)
+                elif isinstance(val, (list, tuple, set, frozenset)):
+                    listval = list(val)
+                    if not listval or (
+                        isinstance(listval[0], (str, bytes, bool, int, float))
+                        and all(type(sval) is type(listval[0]) for sval in listval)
+                    ):
+                        span.set_attribute(f"arg.{name}", listval)
+                elif isinstance(val, dict):
+                    listval_keys = list(val)
+                    listval_values = list(val.values())
+                    if not listval_keys or (
+                        isinstance(listval_keys[0], (str, bytes, bool, int, float))
+                        and all(type(sval) is type(listval_keys[0]) for sval in listval_keys)
+                    ):
+                        span.set_attribute(f"arg.{name}.keys", listval_keys)
+                    if not listval_values or (
+                        isinstance(listval_values[0], (str, bytes, bool, int, float))
+                        and all(type(sval) is type(listval_values[0]) for sval in listval_values)
+                    ):
+                        span.set_attribute(f"arg.{name}.values", listval_values)
+                else:
+                    span.set_attribute(f"arg.{name}.unrepresentable", True)
+            if self._project.filename is not None:
+                span.set_attribute("project.binary_name", self._project.filename)
+            span.set_attribute("project.arch_name", self._project.arch.name)
+
             oself = object.__new__(self._analysis_cls)
             oself.named_errors = defaultdict(list)
             oself.errors = []
@@ -235,8 +277,8 @@ class Analysis:
     :ivar progress.Progress _progressbar: The progress bar object.
     """
 
-    project: "Project"
-    kb: "KnowledgeBase"
+    project: Project
+    kb: KnowledgeBase
     _fail_fast: bool
     _name: str
     errors = []

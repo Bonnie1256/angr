@@ -1,4 +1,7 @@
+from __future__ import annotations
 from sortedcontainers import SortedDict
+
+import claripy
 
 from ....errors import SimRegionMapError
 from ....state_plugins import SimStatePlugin
@@ -50,7 +53,7 @@ class AddressWrapper:
         :param state: A state
         :return: The converted ValueSet instance
         """
-        return state.solver.VS(state.arch.bits, self.region, self.region_base_addr, self.address)
+        return claripy.VS(state.arch.bits, self.region, self.region_base_addr, self.address)
 
 
 class RegionDescriptor:
@@ -70,9 +73,7 @@ class RegionDescriptor:
         self.related_function_address = related_function_address
 
     def __repr__(self):
-        return "<{} - {:#x}>".format(
-            self.region_id, self.related_function_address if self.related_function_address is not None else 0
-        )
+        return f"<{self.region_id} - {self.related_function_address if self.related_function_address is not None else 0:#x}>"
 
 
 class RegionMap:
@@ -197,7 +198,7 @@ class RegionMap:
             return relative_address
 
         if region_id not in self._region_id_to_address:
-            raise SimRegionMapError('Non-existent region ID "%s"' % region_id)
+            raise SimRegionMapError(f'Non-existent region ID "{region_id}"')
 
         base_address = self._region_id_to_address[region_id].base_address
         return base_address + relative_address
@@ -237,7 +238,7 @@ class RegionMap:
                 return "global", absolute_address, None
 
             if target_region_id not in self._region_id_to_address:
-                raise SimRegionMapError('Trying to relativize to a non-existent region "%s"' % target_region_id)
+                raise SimRegionMapError(f'Trying to relativize to a non-existent region "{target_region_id}"')
 
             descriptor = self._region_id_to_address[target_region_id]
             base_address = descriptor.base_address

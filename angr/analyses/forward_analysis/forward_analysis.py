@@ -1,5 +1,6 @@
+from __future__ import annotations
 from collections import defaultdict
-from typing import Any, Optional, Generic, TypeVar, TYPE_CHECKING
+from typing import Any, Generic, TypeVar, TYPE_CHECKING
 from collections.abc import Callable
 
 import networkx
@@ -42,8 +43,8 @@ class ForwardAnalysis(Generic[AnalysisState, NodeType, JobType, JobKey]):
         order_jobs=False,
         allow_merging=False,
         allow_widening=False,
-        status_callback: Callable[[type["ForwardAnalysis"]], Any] | None = None,
-        graph_visitor: "Optional[GraphVisitor[NodeType]]" = None,
+        status_callback: Callable[[type[ForwardAnalysis]], Any] | None = None,
+        graph_visitor: GraphVisitor[NodeType] | None = None,
     ):
         """
         Constructor
@@ -363,8 +364,10 @@ class ForwardAnalysis(Generic[AnalysisState, NodeType, JobType, JobKey]):
         all_input_states = self._input_states.get(self._node_key(node))
         if len(all_input_states) == 1:
             return all_input_states[0]
-        merged_state, _ = self._merge_states(node, *all_input_states)
-        return merged_state
+        if self._allow_merging:
+            merged_state, _ = self._merge_states(node, *all_input_states)
+            return merged_state
+        return all_input_states[0]
 
     def _analysis_core_baremetal(self) -> None:
         if not self._job_info_queue:
@@ -506,7 +509,7 @@ class ForwardAnalysis(Generic[AnalysisState, NodeType, JobType, JobKey]):
         if pos < len(self._job_info_queue):
             return self._job_info_queue[pos].job
 
-        raise IndexError()
+        raise IndexError
 
     def _remove_job(self, predicate: Callable) -> None:
         """

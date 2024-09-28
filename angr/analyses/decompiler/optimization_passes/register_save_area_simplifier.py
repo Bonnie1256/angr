@@ -1,3 +1,4 @@
+from __future__ import annotations
 from collections.abc import Iterable
 import logging
 
@@ -21,6 +22,9 @@ def s2u(s, bits):
 class RegisterSaveAreaSimplifier(OptimizationPass):
     """
     Optimizes away register spilling effects, including callee-saved registers.
+
+    This optimization runs between SSA-level0 and SSA-level1, which means registers are converted to vvars but stack
+    accesses stay unchanged.
     """
 
     ARCHES = None
@@ -52,7 +56,7 @@ class RegisterSaveAreaSimplifier(OptimizationPass):
 
     @staticmethod
     def _modify_statement(
-        old_block, stmt_idx_: int, updated_blocks_, stack_offset: int = None
+        old_block, stmt_idx_: int, updated_blocks_, stack_offset: int | None = None
     ):  # pylint:disable=unused-argument
         if old_block not in updated_blocks_:
             block = old_block.copy()
@@ -95,7 +99,9 @@ class RegisterSaveAreaSimplifier(OptimizationPass):
             if (
                 isinstance(stmt, ailment.Stmt.Store)
                 and isinstance(stmt.addr, ailment.Expr.StackBaseOffset)
-                and isinstance(stmt.data, ailment.Expr.Register)
+                and isinstance(stmt.addr.offset, int)
+                and isinstance(stmt.data, ailment.Expr.VirtualVariable)
+                and stmt.data.was_reg
             ):
                 # it's storing registers to the stack!
                 stack_offset = stmt.addr.offset
@@ -113,7 +119,8 @@ class RegisterSaveAreaSimplifier(OptimizationPass):
                 for idx, stmt in enumerate(block.statements):
                     if (
                         isinstance(stmt, ailment.Stmt.Assignment)
-                        and isinstance(stmt.dst, ailment.Expr.Register)
+                        and isinstance(stmt.dst, ailment.Expr.VirtualVariable)
+                        and stmt.dst.was_reg
                         and isinstance(stmt.src, ailment.Expr.Load)
                         and isinstance(stmt.src.addr, ailment.Expr.StackBaseOffset)
                     ):

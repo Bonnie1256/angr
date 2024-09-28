@@ -1,6 +1,6 @@
 # pylint:disable=unused-argument
-from typing import Optional, Any, TYPE_CHECKING
-from collections import OrderedDict as ODict
+from __future__ import annotations
+from typing import Any, TYPE_CHECKING
 from collections import defaultdict, OrderedDict
 import logging
 
@@ -12,7 +12,7 @@ import claripy
 from ... import Analysis
 from ..condition_processor import ConditionProcessor
 from ..sequence_walker import SequenceWalker
-from ..utils import extract_jump_targets, insert_node, remove_last_statement
+from ..utils import extract_jump_targets, insert_node, remove_last_statement, has_nonlabel_nonphi_statements
 from .structurer_nodes import (
     MultiNode,
     SequenceNode,
@@ -50,18 +50,16 @@ class StructurerBase(Analysis):
         region,
         parent_map=None,
         condition_processor=None,
-        func: Optional["Function"] = None,
+        func: Function | None = None,
         case_entry_to_switch_head: dict[int, int] | None = None,
         parent_region=None,
-        improve_structurer=True,
         **kwargs,
     ):
-        self._region: "GraphRegion" = region
+        self._region: GraphRegion = region
         self._parent_map = parent_map
         self.function = func
         self._case_entry_to_switch_head = case_entry_to_switch_head
         self._parent_region = parent_region
-        self._improve_structurer = improve_structurer
 
         self.cond_proc = (
             condition_processor if condition_processor is not None else ConditionProcessor(self.project.arch)
@@ -76,14 +74,14 @@ class StructurerBase(Analysis):
         self.result = None
 
     def _analyze(self):
-        raise NotImplementedError()
+        raise NotImplementedError
 
     #
     # Basic structuring methods
     #
 
     def _structure_sequence(self, seq: SequenceNode):
-        raise NotImplementedError()
+        raise NotImplementedError
 
     #
     # Util methods
@@ -420,7 +418,7 @@ class StructurerBase(Analysis):
                         elif label == "default":
                             parent.default_node.remove_node(node)
                         else:
-                            raise TypeError("Unsupported label %s." % label)
+                            raise TypeError(f"Unsupported label {label}.")
                     else:
                         # previous nodes
                         if stmt_idx > last_nonjump_stmt_idx:
@@ -610,7 +608,7 @@ class StructurerBase(Analysis):
                 new_node = BreakNode(last_stmt.ins_addr, last_stmt.false_target.value)
             else:
                 _l.warning("None of the branches is jumping to outside of the loop")
-                raise Exception()
+                raise Exception
 
         return new_node
 
@@ -623,10 +621,7 @@ class StructurerBase(Analysis):
             i = 0
             while i < len(seq_node.nodes):
                 old_node = seq_node.nodes[i]
-                if type(old_node) is CodeNode:
-                    node = old_node.node
-                else:
-                    node = old_node
+                node = old_node.node if type(old_node) is CodeNode else old_node
                 new_node = None
                 if isinstance(node, ConditionalBreakNode) and new_nodes:
                     prev_node = new_nodes[-1]
@@ -741,8 +736,8 @@ class StructurerBase(Analysis):
     #
 
     def _reorganize_switch_cases(
-        self, cases: ODict[int | tuple[int, ...], SequenceNode]
-    ) -> ODict[int | tuple[int, ...], SequenceNode]:
+        self, cases: OrderedDict[int | tuple[int, ...], SequenceNode]
+    ) -> OrderedDict[int | tuple[int, ...], SequenceNode]:
         new_cases = OrderedDict()
 
         caseid2gotoaddrs = {}
@@ -831,9 +826,7 @@ class StructurerBase(Analysis):
         addr = node_0.addr if node_0.addr is not None else node_1.addr
 
         # fix the last block of node_0 and remove useless goto statements
-        if isinstance(node_0, SequenceNode) and node_0.nodes:
-            last_node = node_0.nodes[-1]
-        elif isinstance(node_0, MultiNode) and node_0.nodes:
+        if isinstance(node_0, SequenceNode) and node_0.nodes or isinstance(node_0, MultiNode) and node_0.nodes:
             last_node = node_0.nodes[-1]
         elif isinstance(node_0, ailment.Block):
             last_node = node_0
@@ -871,13 +864,10 @@ class StructurerBase(Analysis):
         if isinstance(node_0, SequenceNode):
             if isinstance(node_1, SequenceNode):
                 return SequenceNode(addr, nodes=node_0.nodes + node_1.nodes)
-            else:
-                return SequenceNode(addr, nodes=node_0.nodes + [node_1])
-        else:
-            if isinstance(node_1, SequenceNode):
-                return SequenceNode(addr, nodes=[node_0] + node_1.nodes)
-            else:
-                return SequenceNode(addr, nodes=[node_0, node_1])
+            return SequenceNode(addr, nodes=[*node_0.nodes, node_1])
+        if isinstance(node_1, SequenceNode):
+            return SequenceNode(addr, nodes=[node_0, *node_1.nodes])
+        return SequenceNode(addr, nodes=[node_0, node_1])
 
     def _update_new_sequences(self, removed_sequences: set[SequenceNode], replaced_sequences: dict[SequenceNode, Any]):
         new_sequences = []
@@ -930,7 +920,7 @@ class StructurerBase(Analysis):
             if parent_node.true_node is old_node:
                 parent_node.true_node = new_node
                 return
-            elif parent_node.false_node is old_node:
+            if parent_node.false_node is old_node:
                 parent_node.false_node = new_node
                 return
         elif isinstance(parent_node, CascadingConditionNode):
@@ -951,4 +941,14 @@ class StructurerBase(Analysis):
         elif isinstance(stmt, ailment.Stmt.Jump):
             if isinstance(stmt.target, ailment.Expr.Const) and stmt.target.value == addr:
                 return True
+        return False
+
+    @staticmethod
+    def has_nonlabel_nonphi_statements(node: BaseNode) -> bool:
+        if isinstance(node, ailment.Block):
+            return has_nonlabel_nonphi_statements(node)
+        if isinstance(node, MultiNode):
+            return any(has_nonlabel_nonphi_statements(b) for b in node.nodes)
+        if isinstance(node, SequenceNode):
+            return any(StructurerBase.has_nonlabel_nonphi_statements(nn) for nn in node.nodes)
         return False

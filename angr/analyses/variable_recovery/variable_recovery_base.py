@@ -1,3 +1,4 @@
+from __future__ import annotations
 import weakref
 from typing import Any, TYPE_CHECKING
 from collections.abc import Generator, Iterable
@@ -44,10 +45,10 @@ def parse_stack_pointer(sp):
         off1 = parse_stack_pointer(op1)
         if sp.op == "Sub":
             return off0 - off1
-        elif sp.op == "Add":
+        if sp.op == "Add":
             return off0 + off1
 
-    raise NotImplementedError("Unsupported stack pointer representation type %s." % type(sp))
+    raise NotImplementedError(f"Unsupported stack pointer representation type {type(sp)}.")
 
 
 class VariableAnnotation(Annotation):
@@ -81,7 +82,7 @@ class VariableRecoveryBase(Analysis):
     The base class for VariableRecovery and VariableRecoveryFast.
     """
 
-    def __init__(self, func, max_iterations, store_live_variables: bool):
+    def __init__(self, func, max_iterations, store_live_variables: bool, vvar_to_vvar: dict[int, int] | None = None):
         self.function = func
         self.variable_manager = self.kb.variables
 
@@ -91,6 +92,7 @@ class VariableRecoveryBase(Analysis):
         self._outstates = {}
         self._instates: dict[Any, VariableRecoveryStateBase] = {}
         self._dominance_frontiers = None
+        self.vvar_to_vvar = vvar_to_vvar
 
     #
     # Public methods
@@ -128,7 +130,7 @@ class VariableRecoveryBase(Analysis):
         stack_vars_by_offset = defaultdict(list)
         for sv in stack_vars:
             stack_vars_by_offset[sv.offset].append(sv)
-        for offset, var_list in stack_vars_by_offset.items():
+        for _offset, var_list in stack_vars_by_offset.items():
             if len(var_list) < 2:
                 continue
             single_byte_vars = [v for v in var_list if v.size == 1]
@@ -241,12 +243,10 @@ class VariableRecoveryStateBase:
 
     @staticmethod
     def is_top(thing) -> bool:
-        if isinstance(thing, claripy.ast.BV) and thing.op == "BVS" and thing.args[0] == "top":
-            return True
-        return False
+        return bool(isinstance(thing, claripy.ast.BV) and thing.op == "BVS" and thing.args[0] == "top")
 
     @staticmethod
-    def extract_variables(expr: claripy.ast.Base) -> Generator[tuple[int, SimVariable | SpOffset], None, None]:
+    def extract_variables(expr: claripy.ast.Base) -> Generator[tuple[int, SimVariable | SpOffset]]:
         for anno in expr.annotations:
             if isinstance(anno, VariableAnnotation):
                 yield from anno.addr_and_variables
@@ -255,8 +255,7 @@ class VariableRecoveryStateBase:
     def annotate_with_variables(
         expr: claripy.ast.Base, addr_and_variables: Iterable[tuple[int, SimVariable | SpOffset]]
     ) -> claripy.ast.Base:
-        expr = expr.replace_annotations((VariableAnnotation(list(addr_and_variables)),))
-        return expr
+        return expr.replace_annotations((VariableAnnotation(list(addr_and_variables)),))
 
     def stack_address(self, offset: int) -> claripy.ast.Base:
         base = claripy.BVS("stack_base", self.arch.bits, explicit_name=True)
@@ -284,7 +283,7 @@ class VariableRecoveryStateBase:
             if addr.args[0] == "stack_base":
                 return claripy.BVV(0, addr.size())
             return None
-        elif addr.op == "BVV":
+        if addr.op == "BVV":
             r = addr
         elif addr.op == "__add__":
             arg_offsets = []
@@ -408,7 +407,7 @@ class VariableRecoveryStateBase:
 
     @staticmethod
     def _mo_cmp(
-        mos_self: set["SimMemoryObject"], mos_other: set["SimMemoryObject"], addr: int, size: int
+        mos_self: set[SimMemoryObject], mos_other: set[SimMemoryObject], addr: int, size: int
     ):  # pylint:disable=unused-argument
         # comparing bytes from two sets of memory objects
         # we don't need to resort to byte-level comparison. object-level is good enough.
@@ -436,8 +435,7 @@ class VariableRecoveryStateBase:
                 self.phi_variables[var] = phi_var
 
         r = self.top(bits)
-        r = self.annotate_with_variables(r, [(0, phi_var)])
-        return r
+        return self.annotate_with_variables(r, [(0, phi_var)])
 
     def _phi_node_contains(self, phi_variable, variable):
         """

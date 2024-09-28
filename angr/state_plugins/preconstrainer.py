@@ -1,4 +1,6 @@
+from __future__ import annotations
 import logging
+
 import claripy
 
 from .plugin import SimStatePlugin
@@ -52,11 +54,11 @@ class SimStatePreconstrainer(SimStatePlugin):
         :param variable:    The BVS to preconstrain.
         """
         if not isinstance(value, claripy.ast.Base):
-            value = self.state.solver.BVV(value, len(variable))
+            value = claripy.BVV(value, len(variable))
         elif value.op != "BVV":
             raise ValueError("Passed a value to preconstrain that was not a BVV or a string")
 
-        if variable.op not in claripy.operations.leaf_operations:
+        if not variable.is_leaf():
             l.warning(
                 "The variable %s to preconstrain is not a leaf AST. This may cause replacement failures in the "
                 "claripy replacement backend.",
@@ -145,13 +147,13 @@ class SimStatePreconstrainer(SimStatePlugin):
         precon_cache_keys = set()
 
         for con in self.preconstraints:
-            precon_cache_keys.add(con.cache_key)
+            precon_cache_keys.add(con.hash())
 
         # if we used the replacement solver we didn't add constraints we need to remove so keep all constraints
         if o.REPLACEMENT_SOLVER in self.state.options:
             new_constraints = self.state.solver.constraints
         else:
-            new_constraints = [x for x in self.state.solver.constraints if x.cache_key not in precon_cache_keys]
+            new_constraints = [x for x in self.state.solver.constraints if x.hash() not in precon_cache_keys]
 
         if self.state.has_plugin("zen_plugin"):
             new_constraints = self.state.get_plugin("zen_plugin").filter_constraints(new_constraints)

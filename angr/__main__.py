@@ -1,6 +1,8 @@
+from __future__ import annotations
 import argparse
 
-from angr.analyses.decompiler.structuring import STRUCTURER_CLASSES
+from angr.analyses.decompiler import DECOMPILATION_PRESETS
+from angr.analyses.decompiler.structuring import STRUCTURER_CLASSES, DEFAULT_STRUCTURER
 from angr.analyses.decompiler.utils import decompile_functions
 
 
@@ -37,18 +39,44 @@ def main():
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+        "--base-addr",
+        help="""
+        The base address of the binary. This is useful when the binary is loaded at a different address than the one
+        specified in the ELF header.""",
+        type=lambda x: int(x, 0),
+        default=None,
+    )
     # decompilation-specific arguments
     parser.add_argument(
         "--structurer",
         help="The structuring algorithm to use for decompilation.",
         choices=STRUCTURER_CLASSES.keys(),
-        default="phoenix",
+        default=DEFAULT_STRUCTURER.NAME,
+    )
+    parser.add_argument(
+        "--no-casts",
+        help="Do not show type casts in the decompiled output.",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--preset",
+        help="The configuration preset to use for decompilation.",
+        choices=DECOMPILATION_PRESETS,
+        default="default",
     )
 
     args = parser.parse_args()
     if args.command == COMMANDS.DECOMPILE:
         decompilation = decompile_functions(
-            args.binary, functions=args.functions, structurer=args.structurer, catch_errors=args.catch_exceptions
+            args.binary,
+            functions=args.functions,
+            structurer=args.structurer,
+            catch_errors=args.catch_exceptions,
+            show_casts=not args.no_casts,
+            base_address=args.base_addr,
+            preset=args.preset,
         )
         print(decompilation)
     else:

@@ -2,6 +2,7 @@
 """
 All type constants used in type inference. They can be mapped, translated, or rewritten to C-style types.
 """
+from __future__ import annotations
 
 import functools
 
@@ -9,10 +10,7 @@ import functools
 def memoize(f):
     @functools.wraps(f)
     def wrapped_repr(self, *args, **kwargs):
-        if not kwargs or "memo" not in kwargs:
-            memo = set()
-        else:
-            memo = kwargs.pop("memo")
+        memo = set() if not kwargs or "memo" not in kwargs else kwargs.pop("memo")
         if self in memo:
             return "..."
         memo.add(self)
@@ -41,11 +39,11 @@ class TypeConstant:
     @property
     def size(self) -> int:
         if self.SIZE is None:
-            raise NotImplementedError()
+            raise NotImplementedError
         return self.SIZE
 
     def __repr__(self, memo=None):
-        raise NotImplementedError()
+        raise NotImplementedError
 
 
 class TopType(TypeConstant):
@@ -100,6 +98,13 @@ class Int128(Int):
 
     def __repr__(self, memo=None):
         return "int128"
+
+
+class Int256(Int):
+    SIZE = 32
+
+    def __repr__(self, memo=None):
+        return "int256"
 
 
 class FloatBase(TypeConstant):
@@ -176,9 +181,8 @@ class Array(TypeConstant):
     @memoize
     def __repr__(self, memo=None):
         if self.count is None:
-            return "%r[?]" % self.element
-        else:
-            return "%r[%d]" % (self.element, self.count)
+            return f"{self.element!r}[?]"
+        return "%r[%d]" % (self.element, self.count)
 
     def __eq__(self, other):
         return type(other) is type(self) and self.element == other.element and self.count == other.count
@@ -215,7 +219,12 @@ class Struct(TypeConstant):
         prefix = "struct"
         if self.name:
             prefix = f"struct {self.name}"
-        return prefix + "{" + ", ".join(f"{k}:{v.__repr__(memo=memo)}" for k, v in self.fields.items()) + "}"
+        return (
+            prefix
+            + "{"
+            + ", ".join(f"{k}:{v.__repr__(memo=memo) if v is not None else 'None'}" for k, v in self.fields.items())
+            + "}"
+        )
 
     def __eq__(self, other):
         return type(other) is type(self) and hash(self) == hash(other)
@@ -258,7 +267,7 @@ class TypeVariableReference(TypeConstant):
         self.typevar = typevar
 
     def __repr__(self, memo=None):
-        return "ref(%s)" % self.typevar
+        return f"ref({self.typevar})"
 
     def __eq__(self, other):
         return type(other) is type(self) and self.typevar == other.typevar
@@ -280,6 +289,7 @@ def int_type(bits: int) -> Int | None:
         32: Int32,
         64: Int64,
         128: Int128,
+        256: Int256,
     }
     if bits in mapping:
         return mapping[bits]()
@@ -289,6 +299,6 @@ def int_type(bits: int) -> Int | None:
 def float_type(bits: int) -> FloatBase | None:
     if bits == 32:
         return Float()
-    elif bits == 64:
+    if bits == 64:
         return Double()
     return None

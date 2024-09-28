@@ -1,4 +1,5 @@
 # pylint:disable=no-member
+from __future__ import annotations
 from ...protos import cfg_pb2
 from ...serializable import Serializable
 
@@ -15,6 +16,7 @@ class MemoryDataSort:
     GOTPLTEntry = "GOT PLT Entry"
     ELFHeader = "elf-header"
     FloatingPoint = "fp"  # the size is determined by the MemoryData itself
+    Alignment = "alignment"
 
 
 _SORT_TO_IDX = {
@@ -71,7 +73,7 @@ class MemoryData(Serializable):
 
         self.content: bytes | None = None  # temporary annotation
 
-    def __eq__(self, other: "MemoryData"):
+    def __eq__(self, other: MemoryData):
         return (
             self.addr == other.addr
             and self.size == other.size
@@ -147,10 +149,9 @@ class MemoryData(Serializable):
 
     @classmethod
     def parse_from_cmessage(cls, cmsg, **kwargs):
-        md = cls(
+        return cls(
             cmsg.ea,
             cmsg.size if cmsg.HasField("size") else None,
             _IDX_TO_SORT[cmsg.type],
             reference_size=cmsg.reference_size if cmsg.HasField("reference_size") else None,
         )
-        return md

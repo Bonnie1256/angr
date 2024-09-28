@@ -1,4 +1,5 @@
-from typing import Optional, Any, TYPE_CHECKING, overload
+from __future__ import annotations
+from typing import Any, TYPE_CHECKING, overload
 from collections.abc import Iterable, Iterator
 import logging
 
@@ -9,6 +10,7 @@ from angr.misc.ux import deprecated
 from angr.knowledge_plugins.key_definitions.environment import Environment
 from angr.knowledge_plugins.key_definitions.tag import Tag
 from angr.knowledge_plugins.key_definitions.heap_address import HeapAddress
+from angr.knowledge_plugins.key_definitions.definition import A
 from angr.engines.light import SpOffset
 from angr.code_location import CodeLocation
 from ...storage.memory_mixins.paged_memory.pages.multi_values import MultiValues
@@ -83,15 +85,15 @@ class ReachingDefinitionsState:
         subject: Subject,
         track_tmps: bool = False,
         track_consts: bool = False,
-        analysis: Optional["ReachingDefinitionsAnalysis"] = None,
+        analysis: ReachingDefinitionsAnalysis | None = None,
         rtoc_value=None,
         live_definitions: LiveDefinitions | None = None,
         canonical_size: int = 8,
         heap_allocator: HeapAllocator = None,
         environment: Environment = None,
         sp_adjusted: bool = False,
-        all_definitions: set[Definition] | None = None,
-        initializer: Optional["RDAStateInitializer"] = None,
+        all_definitions: set[Definition[A]] | None = None,
+        initializer: RDAStateInitializer | None = None,
         element_limit: int = 5,
         merge_into_tops: bool = True,
     ):
@@ -106,12 +108,12 @@ class ReachingDefinitionsState:
         self._sp_adjusted: bool = sp_adjusted
         self._element_limit: int = element_limit
 
-        self.all_definitions: set[Definition] = set() if all_definitions is None else all_definitions
+        self.all_definitions: set[Definition[A]] = set() if all_definitions is None else all_definitions
 
         self.heap_allocator = heap_allocator or HeapAllocator(canonical_size)
         self._environment: Environment = environment or Environment()
 
-        self.codeloc_uses: set[Definition] = set()
+        self.codeloc_uses: set[Definition[A]] = set()
 
         # have we observed an exit statement or not during the analysis of the *last instruction* of a block? we should
         # not perform any sp updates if it is the case. this is for handling conditional returns in ARM binaries.
@@ -178,10 +180,9 @@ class ReachingDefinitionsState:
     def _initial_stack_pointer(self):
         if self.arch.bits == 32:
             return claripy.BVS("stack_base", 32, explicit_name=True)
-        elif self.arch.bits == 64:
+        if self.arch.bits == 64:
             return claripy.BVS("stack_base", 64, explicit_name=True)
-        else:
-            raise ValueError("Unsupported architecture word size %d" % self.arch.bits)
+        raise ValueError("Unsupported architecture word size %d" % self.arch.bits)
 
     def _to_signed(self, n):
         if n >= 2 ** (self.arch.bits - 1):
@@ -189,7 +190,7 @@ class ReachingDefinitionsState:
             return n - 2**self.arch.bits
         return n
 
-    def annotate_with_def(self, symvar: claripy.ast.Base, definition: Definition) -> claripy.ast.Base:
+    def annotate_with_def(self, symvar: claripy.ast.Base, definition: Definition[A]) -> claripy.ast.Base:
         """
 
         :param symvar:
@@ -198,14 +199,14 @@ class ReachingDefinitionsState:
         """
         return self.live_definitions.annotate_with_def(symvar, definition)
 
-    def annotate_mv_with_def(self, mv: MultiValues, definition: Definition) -> MultiValues:
+    def annotate_mv_with_def(self, mv: MultiValues, definition: Definition[A]) -> MultiValues:
         return MultiValues(
             offset_to_values={
                 offset: {self.annotate_with_def(value, definition) for value in values} for offset, values in mv.items()
             }
         )
 
-    def extract_defs(self, symvar: claripy.ast.Base) -> Iterator[Definition]:
+    def extract_defs(self, symvar: claripy.ast.Base) -> Iterator[Definition[A]]:
         yield from self.live_definitions.extract_defs(symvar)
 
     #
@@ -275,8 +276,8 @@ class ReachingDefinitionsState:
         return self.analysis.dep_graph
 
     def __repr__(self):
-        ctnt = "RDState-%r" % (self.live_definitions)
-        return "{%s}" % ctnt
+        ctnt = f"RDState-{self.live_definitions!r}"
+        return f"{{{ctnt}}}"
 
     def _set_initialization_values(
         self,
@@ -305,8 +306,8 @@ class ReachingDefinitionsState:
 
         return self
 
-    def copy(self, discard_tmpdefs=False) -> "ReachingDefinitionsState":
-        rd = ReachingDefinitionsState(
+    def copy(self, discard_tmpdefs=False) -> ReachingDefinitionsState:
+        return ReachingDefinitionsState(
             self.codeloc,
             self.arch,
             self._subject,
@@ -322,18 +323,16 @@ class ReachingDefinitionsState:
             element_limit=self._element_limit,
         )
 
-        return rd
-
-    def merge(self, *others) -> tuple["ReachingDefinitionsState", bool]:
+    def merge(self, *others) -> tuple[ReachingDefinitionsState, bool]:
         state = self.copy()
-        others: Iterable["ReachingDefinitionsState"]
+        others: Iterable[ReachingDefinitionsState]
 
         state.live_definitions, merged_0 = state.live_definitions.merge(*[other.live_definitions for other in others])
         state._environment, merged_1 = state.environment.merge(*[other.environment for other in others])
 
         return state, merged_0 or merged_1
 
-    def compare(self, other: "ReachingDefinitionsState") -> bool:
+    def compare(self, other: ReachingDefinitionsState) -> bool:
         r0 = self.live_definitions.compare(other.live_definitions)
         r1 = self.environment.compare(other.environment)
 
@@ -361,12 +360,12 @@ class ReachingDefinitionsState:
         atom: Atom,
         data: MultiValues,
         dummy=False,
-        tags: set[Tag] = None,
+        tags: set[Tag] | None = None,
         endness=None,  # XXX destroy
         annotated: bool = False,
-        uses: set[Definition] | None = None,
+        uses: set[Definition[A]] | None = None,
         override_codeloc: CodeLocation | None = None,
-    ) -> tuple[MultiValues | None, set[Definition]]:
+    ) -> tuple[MultiValues | None, set[Definition[A]]]:
         codeloc = override_codeloc or self.codeloc
         existing_defs = self.live_definitions.get_definitions(atom)
         mv = self.live_definitions.kill_and_add_definition(
@@ -446,7 +445,7 @@ class ReachingDefinitionsState:
         self.codeloc_uses.update(self.get_definitions(atom))
         self.live_definitions.add_use(atom, self.codeloc, expr=expr)
 
-    def add_use_by_def(self, definition: Definition, expr: Any | None = None) -> None:
+    def add_use_by_def(self, definition: Definition[A], expr: Any | None = None) -> None:
         self.codeloc_uses.add(definition)
         self.live_definitions.add_use_by_def(definition, self.codeloc, expr=expr)
 
@@ -455,7 +454,7 @@ class ReachingDefinitionsState:
         self.add_tmp_use_by_defs(defs, expr=expr)
 
     def add_tmp_use_by_defs(
-        self, defs: Iterable[Definition], expr: Any | None = None
+        self, defs: Iterable[Definition[A]], expr: Any | None = None
     ) -> None:  # pylint:disable=unused-argument
         for definition in defs:
             self.codeloc_uses.add(definition)
@@ -466,7 +465,7 @@ class ReachingDefinitionsState:
         defs = self.live_definitions.get_register_definitions(reg_offset, size)
         self.add_register_use_by_defs(defs, expr=expr)
 
-    def add_register_use_by_defs(self, defs: Iterable[Definition], expr: Any | None = None) -> None:
+    def add_register_use_by_defs(self, defs: Iterable[Definition[A]], expr: Any | None = None) -> None:
         for definition in defs:
             self.codeloc_uses.add(definition)
             self.live_definitions.add_register_use_by_def(definition, self.codeloc, expr=expr)
@@ -475,7 +474,7 @@ class ReachingDefinitionsState:
         defs = self.live_definitions.get_stack_definitions(stack_offset, size)
         self.add_stack_use_by_defs(defs, expr=expr)
 
-    def add_stack_use_by_defs(self, defs: Iterable[Definition], expr: Any | None = None):
+    def add_stack_use_by_defs(self, defs: Iterable[Definition[A]], expr: Any | None = None):
         for definition in defs:
             self.codeloc_uses.add(definition)
             self.live_definitions.add_stack_use_by_def(definition, self.codeloc, expr=expr)
@@ -484,41 +483,39 @@ class ReachingDefinitionsState:
         defs = self.live_definitions.get_heap_definitions(heap_offset, size)
         self.add_heap_use_by_defs(defs, expr=expr)
 
-    def add_heap_use_by_defs(self, defs: Iterable[Definition], expr: Any | None = None):
+    def add_heap_use_by_defs(self, defs: Iterable[Definition[A]], expr: Any | None = None):
         for definition in defs:
             self.codeloc_uses.add(definition)
             self.live_definitions.add_heap_use_by_def(definition, self.codeloc, expr=expr)
 
-    def add_memory_use_by_def(self, definition: Definition, expr: Any | None = None):
+    def add_memory_use_by_def(self, definition: Definition[A], expr: Any | None = None):
         self.codeloc_uses.add(definition)
         self.live_definitions.add_memory_use_by_def(definition, self.codeloc, expr=expr)
 
-    def add_memory_use_by_defs(self, defs: Iterable[Definition], expr: Any | None = None):
+    def add_memory_use_by_defs(self, defs: Iterable[Definition[A]], expr: Any | None = None):
         for definition in defs:
             self.codeloc_uses.add(definition)
             self.live_definitions.add_memory_use_by_def(definition, self.codeloc, expr=expr)
 
-    def get_definitions(self, atom: Atom | Definition | Iterable[Atom] | Iterable[Definition]) -> set[Definition]:
+    def get_definitions(self, atom: A | Definition[A] | Iterable[A] | Iterable[Definition[A]]) -> set[Definition[A]]:
         return self.live_definitions.get_definitions(atom)
 
-    def get_values(self, spec: Atom | Definition | Iterable[Atom]) -> MultiValues | None:
+    def get_values(self, spec: A | Definition[A] | Iterable[A]) -> MultiValues | None:
         return self.live_definitions.get_values(spec)
 
-    def get_one_value(self, spec: Atom | Definition, strip_annotations: bool = False) -> claripy.ast.bv.BV | None:
+    def get_one_value(
+        self, spec: A | Definition[A] | Iterable[A] | Iterable[Definition[A]], strip_annotations: bool = False
+    ) -> claripy.ast.bv.BV | None:
         return self.live_definitions.get_one_value(spec, strip_annotations=strip_annotations)
 
     @overload
-    def get_concrete_value(
-        self, spec: Atom | Definition[Atom] | Iterable[Atom], cast_to: type[int] = ...
-    ) -> int | None: ...
+    def get_concrete_value(self, spec: A | Definition[A] | Iterable[A], cast_to: type[int] = ...) -> int | None: ...
 
     @overload
-    def get_concrete_value(
-        self, spec: Atom | Definition[Atom] | Iterable[Atom], cast_to: type[bytes] = ...
-    ) -> bytes | None: ...
+    def get_concrete_value(self, spec: A | Definition[A] | Iterable[A], cast_to: type[bytes] = ...) -> bytes | None: ...
 
     def get_concrete_value(
-        self, spec: Atom | Definition[Atom] | Iterable[Atom], cast_to: type[int] | type[bytes] = int
+        self, spec: A | Definition[A] | Iterable[A], cast_to: type[int] | type[bytes] = int
     ) -> int | bytes | None:
         return self.live_definitions.get_concrete_value(spec, cast_to)
 
@@ -591,7 +588,7 @@ class ReachingDefinitionsState:
     @overload
     def deref(
         self,
-        pointer: MultiValues | Atom | Definition | Iterable[Atom] | Iterable[Definition],
+        pointer: MultiValues | A | Definition | Iterable[A] | Iterable[Definition[A]],
         size: int | DerefSize,
         endness: str = ...,
     ) -> set[MemoryLocation]: ...
@@ -600,10 +597,10 @@ class ReachingDefinitionsState:
         self,
         pointer: (
             MultiValues
-            | Atom
+            | A
             | Definition
-            | Iterable[Atom]
-            | Iterable[Definition]
+            | Iterable[A]
+            | Iterable[Definition[A]]
             | int
             | claripy.ast.BV
             | HeapAddress
