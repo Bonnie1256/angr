@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from ailment.block import Block
-from ailment.statement import Statement, Assignment, Store, Call, Return, ConditionalJump
+from ailment.statement import Statement, Assignment, Store, Call, Return, ConditionalJump, DirtyStatement
 from ailment.expression import (
     Register,
     VirtualVariable,
@@ -14,6 +14,8 @@ from ailment.expression import (
     Convert,
     StackBaseOffset,
     ITE,
+    VEXCCallExpression,
+    DirtyExpression,
 )
 
 from angr.engines.light import SimEngineLight, SimEngineLightAILMixin
@@ -126,7 +128,7 @@ class SimEngineDephiRewriting(
         return None
 
     def _handle_Call(self, stmt: Call) -> Call | None:
-        new_target = self._expr(stmt.target) if stmt.target is not None else None
+        new_target = self._expr(stmt.target) if stmt.target is not None and not isinstance(stmt.target, str) else None
         new_ret_expr = self._expr(stmt.ret_expr) if stmt.ret_expr is not None else None
         new_fp_ret_expr = self._expr(stmt.fp_ret_expr) if stmt.fp_ret_expr is not None else None
 
@@ -139,9 +141,18 @@ class SimEngineDephiRewriting(
                 args=stmt.args,
                 ret_expr=stmt.ret_expr if new_ret_expr is None else new_ret_expr,
                 fp_ret_expr=stmt.fp_ret_expr if new_fp_ret_expr is None else new_fp_ret_expr,
+                bits=stmt.bits,
                 **stmt.tags,
             )
         return None
+
+    _handle_CallExpr = _handle_Call
+
+    def _handle_DirtyStatement(self, stmt: DirtyStatement) -> DirtyStatement | None:
+        dirty = self._expr(stmt.dirty)
+        if dirty is None or dirty is stmt.dirty:
+            return None
+        return DirtyStatement(stmt.idx, dirty, **stmt.tags)
 
     def _handle_Register(self, expr: Register) -> None:
         return None
@@ -239,6 +250,58 @@ class SimEngineDephiRewriting(
                 expr.cond if new_cond is None else new_cond,
                 expr.iftrue if new_iftrue is None else new_iftrue,
                 expr.iffalse if new_iffalse is None else new_iffalse,
+                **expr.tags,
+            )
+        return None
+
+    def _handle_VEXCCallExpression(self, expr: VEXCCallExpression) -> VEXCCallExpression | None:
+        new_operands = []
+        updated = False
+        for o in expr.operands:
+            new_o = self._expr(o)
+            if new_o is not None:
+                updated = True
+                new_operands.append(new_o)
+            else:
+                new_operands.append(o)
+
+        if updated:
+            return VEXCCallExpression(
+                expr.idx,
+                expr.callee,
+                new_operands,
+                bits=expr.bits,
+                **expr.tags,
+            )
+        return None
+
+    def _handle_DirtyExpression(self, expr: DirtyExpression) -> DirtyExpression | None:
+        new_operands = []
+        updated = False
+        for o in expr.operands:
+            new_o = self._expr(o)
+            if new_o is not None:
+                updated = True
+                new_operands.append(new_o)
+            else:
+                new_operands.append(o)
+
+        new_guard = None
+        if expr.guard is not None:
+            new_guard = self._expr(expr.guard)
+            if new_guard is not None:
+                updated = True
+
+        if updated:
+            return DirtyExpression(
+                expr.idx,
+                expr.callee,
+                new_operands,
+                guard=new_guard,
+                mfx=expr.mfx,
+                maddr=expr.maddr,
+                msize=expr.msize,
+                bits=expr.bits,
                 **expr.tags,
             )
         return None

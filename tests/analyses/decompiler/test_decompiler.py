@@ -40,7 +40,7 @@ from angr.analyses.decompiler.structuring.phoenix import MultiStmtExprMode
 from angr.misc.testing import is_testing
 from angr.utils.library import convert_cproto_to_py
 
-from ...common import bin_location, slow_test
+from tests.common import bin_location, slow_test
 
 
 test_location = os.path.join(bin_location, "tests")
@@ -92,7 +92,6 @@ def for_all_structuring_algos(func):
     @wraps(func)
     def _for_all_structuring_algos(*args, **kwargs):
         orig_opts = kwargs.pop("decompiler_options", None) or []
-        ret_vals = []
         structurer_option = get_structurer_option()
         for structurer in STRUCTURER_CLASSES:
             # skip Phoenix since SAILR supersedes it and is a subclass
@@ -100,9 +99,7 @@ def for_all_structuring_algos(func):
                 continue
 
             new_opts = [*orig_opts, (structurer_option, structurer)]
-            ret_vals.append(func(*args, decompiler_options=new_opts, **kwargs))
-
-        return ret_vals
+            func(*args, decompiler_options=new_opts, **kwargs)
 
     return _for_all_structuring_algos
 
@@ -112,11 +109,9 @@ def structuring_algo(algo: str):
         @wraps(func)
         def inner(*args, **kwargs):
             orig_opts = kwargs.pop("decompiler_options", None) or []
-            ret_vals = []
             structurer_option = get_structurer_option()
             new_opts = [*orig_opts, (structurer_option, algo)]
-            ret_vals.append(func(*args, decompiler_options=new_opts, **kwargs))
-            return ret_vals
+            func(*args, decompiler_options=new_opts, **kwargs)
 
         return inner
 
@@ -411,6 +406,7 @@ class TestDecompiler(unittest.TestCase):
         else:
             assert code.count("32") == 2
 
+    @slow_test
     @for_all_structuring_algos
     def test_decompiling_true_a_x86_64_0(self, decompiler_options=None):
         bin_path = os.path.join(test_location, "x86_64", "true_a")
@@ -616,7 +612,6 @@ class TestDecompiler(unittest.TestCase):
         else:
             assert False, "Did not find statement 'puts(\"Empty title\");'"
 
-    @slow_test
     @for_all_structuring_algos
     def test_decompiling_libsoap(self, decompiler_options=None):
         bin_path = os.path.join(test_location, "armel", "libsoap.so")
@@ -1194,7 +1189,6 @@ class TestDecompiler(unittest.TestCase):
 
         assert "__stack_chk_fail" not in code  # stack canary checks should be removed by default
 
-    @slow_test
     @for_all_structuring_algos
     def test_decompiling_newburry_main(self, decompiler_options=None):
         bin_path = os.path.join(test_location, "x86_64", "decompiler", "newbury")
@@ -1667,7 +1661,6 @@ class TestDecompiler(unittest.TestCase):
         assert "b_ptr += 1;" in d.codegen.text
         assert "return c_ptr->c4->c2[argc].b2.a2;" in d.codegen.text
 
-    @slow_test
     @for_all_structuring_algos
     def test_call_return_variable_folding(self, decompiler_options=None):
         bin_path = os.path.join(test_location, "x86_64", "decompiler", "ls_gcc_O0")
@@ -2513,7 +2506,6 @@ class TestDecompiler(unittest.TestCase):
         assert text.count("case -130:") == 1
         assert text.count("case -131:") == 1
 
-    @slow_test
     @structuring_algo("sailr")
     def test_eager_returns_simplifier_no_duplication_of_default_case(self, decompiler_options=None):
         bin_path = os.path.join(test_location, "x86_64", "ls_ubuntu_2004")
@@ -3880,6 +3872,20 @@ class TestDecompiler(unittest.TestCase):
         assert 'RegisterWindowMessageA("ISDEL_MSG_DELDONE32");' in d.codegen.text
         assert "𝜙" not in d.codegen.text
         assert "Phi" not in d.codegen.text
+
+    def test_decompiling_phoenix_natural_loop_region_head_in_body(self, decompiler_options=None):
+        # region head should not be the second node (or onwards) in the body (the sequence node) of a loop
+        bin_path = os.path.join(
+            test_location, "x86_64", "windows", "059ef54d0a97345369d236aafb051917c50680020a1bc532236072f4d341d9e3"
+        )
+        proj = angr.Project(bin_path, auto_load_libs=False)
+
+        cfg = proj.analyses.CFGFast(force_smart_scan=False, normalize=True, data_references=True)
+        f = proj.kb.functions[0x442300]
+
+        d = proj.analyses[Decompiler].prep()(f, cfg=cfg.model, options=decompiler_options)
+        self._print_decompilation_result(d)
+        # we are good if decompiling this function does not raise any exception
 
 
 if __name__ == "__main__":

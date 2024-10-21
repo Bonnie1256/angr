@@ -10,12 +10,12 @@ import pyvex
 import claripy
 import archinfo
 
-from ...misc.ux import once
-from ...engines.vex.claripy.datalayer import value as claripy_value
-from ...engines.vex.claripy.irop import UnsupportedIROpError, SimOperationError, vexop_to_simop
-from ...code_location import CodeLocation
-from ...utils.constants import DEFAULT_STATEMENT
-from ..engine import SimEngine
+from angr.misc.ux import once
+from angr.engines.vex.claripy.datalayer import value as claripy_value
+from angr.engines.vex.claripy.irop import UnsupportedIROpError, SimOperationError, vexop_to_simop
+from angr.code_location import CodeLocation
+from angr.utils.constants import DEFAULT_STATEMENT
+from angr.engines.engine import SimEngine
 import contextlib
 
 
@@ -604,6 +604,9 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
         if self._is_top(expr_0) or self._is_top(expr_1):
             return self._top(expr.result_size(self.tyenv))
 
+        if expr_1.concrete and expr_1.concrete_value == 0:
+            return self._top(expr.result_size(self.tyenv))
+
         signed = "U" in expr.op  # Iop_DivModU64to32 vs Iop_DivMod
         from_size = expr_0.size()
         to_size = expr_1.size()
@@ -632,10 +635,13 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
         if self._is_top(expr_0) or self._is_top(expr_1):
             return self._top(expr_0.size())
 
+        if expr_1.concrete and expr_1.concrete_value == 0:
+            return self._top(expr.result_size(self.tyenv))
+
         try:
             return expr_0 / expr_1
         except ZeroDivisionError:
-            return self._top(expr_0.size())
+            return self._top(expr.result_size(self.tyenv))
 
     def _handle_Mod(self, expr):
         args, r = self._binop_get_args(expr)
@@ -645,6 +651,9 @@ class SimEngineLightVEXMixin(SimEngineLightMixin):
 
         if self._is_top(expr_0) or self._is_top(expr_1):
             return self._top(expr_0.size())
+
+        if expr_1.concrete and expr_1.concrete_value == 0:
+            return self._top(expr.result_size(self.tyenv))
 
         try:
             return expr_0 - (expr_1 // expr_1) * expr_1
@@ -948,6 +957,9 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
     def _ail_handle_Return(self, stmt):
         pass
 
+    def _ail_handle_DirtyStatement(self, stmt):
+        self._expr(stmt.dirty)
+
     #
     # Expression handlers
     #
@@ -974,7 +986,8 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
         return expr
 
     def _ail_handle_CallExpr(self, expr: ailment.Stmt.Call):
-        self._expr(expr.target)
+        if not isinstance(expr.target, str):
+            self._expr(expr.target)
         return expr
 
     def _ail_handle_Reinterpret(self, expr: ailment.Expr.Reinterpret):
@@ -997,6 +1010,15 @@ class SimEngineLightAILMixin(SimEngineLightMixin):
             b = struct.pack("<f", arg)
             return struct.unpack("<I", b)[0]
 
+        return expr
+
+    def _ail_handle_DirtyExpression(self, expr: ailment.Expr.DirtyExpression):
+        for operand in expr.operands:
+            self._expr(operand)
+        if expr.guard is not None:
+            self._expr(expr.guard)
+        if expr.maddr is not None:
+            self._expr(expr.maddr)
         return expr
 
     def _ail_handle_UnaryOp(self, expr):

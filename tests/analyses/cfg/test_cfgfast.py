@@ -14,7 +14,7 @@ from angr.utils.segment_list import SegmentList
 from angr.knowledge_plugins.cfg import CFGNode, CFGModel, MemoryDataSort
 from angr.analyses.cfg.indirect_jump_resolvers import mips_elf_fast
 
-from ...common import bin_location, slow_test
+from tests.common import bin_location, slow_test
 
 l = logging.getLogger("angr.tests.test_cfgfast")
 
@@ -244,7 +244,7 @@ class TestCfgfast(unittest.TestCase):
         mips_elf_fast.enable_profiling()
         _ = proj.analyses.CFG()
         mips_elf_fast.disable_profiling()
-        assert mips_elf_fast.HITS_CASE_0 >= 10
+        assert mips_elf_fast.HITS_CASE_1 >= 10
 
     def test_cfg_loop_unrolling(self):
         edges = {

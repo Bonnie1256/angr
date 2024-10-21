@@ -5,7 +5,7 @@ from collections import defaultdict
 
 from ailment.block import Block
 from ailment.expression import Const, VirtualVariable, VirtualVariableCategory, StackBaseOffset
-from ailment.statement import Assignment, Store, Return
+from ailment.statement import Assignment, Store, Return, Jump
 
 from angr.knowledge_plugins.functions import Function
 from angr.code_location import CodeLocation
@@ -38,7 +38,7 @@ class SPropagatorAnalysis(Analysis):
     Constant and expression propagation that only supports SSA AIL graphs.
     """
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-positional-arguments
         self,
         subject,
         func_graph=None,
@@ -98,11 +98,15 @@ class SPropagatorAnalysis(Analysis):
         # find all vvar uses
         vvar_uselocs = get_vvar_uselocs(blocks.values())
 
-        # find all ret sites
+        # find all ret sites and indirect jump sites
         retsites: set[tuple[int, int | None, int]] = set()
+        jumpsites: set[tuple[int, int | None, int]] = set()
         for bb in blocks.values():
-            if bb.statements and isinstance(bb.statements[-1], Return):
-                retsites.add((bb.addr, bb.idx, len(bb.statements) - 1))
+            if bb.statements:
+                if isinstance(bb.statements[-1], Return):
+                    retsites.add((bb.addr, bb.idx, len(bb.statements) - 1))
+                elif isinstance(bb.statements[-1], Jump):
+                    jumpsites.add((bb.addr, bb.idx, len(bb.statements) - 1))
 
         replacements = defaultdict(dict)
 
@@ -169,13 +173,13 @@ class SPropagatorAnalysis(Analysis):
                         {
                             loc
                             for _, loc in vvar_uselocs[vvar.varid]
-                            if (loc.block_addr, loc.block_idx, loc.stmt_idx) not in retsites
+                            if (loc.block_addr, loc.block_idx, loc.stmt_idx) not in (retsites | jumpsites)
                         }
                     )
                     == 1
                 ):
                     if is_const_and_vvar_assignment(stmt):
-                        # this vvar is used once if we exclude its uses at ret sites. we can propagate it
+                        # this vvar is used once if we exclude its uses at ret sites or jump sites. we can propagate it
                         for vvar_used, vvar_useloc in vvar_uselocs[vvar.varid]:
                             replacements[vvar_useloc][vvar_used] = stmt.src
 
@@ -234,15 +238,22 @@ class SPropagatorAnalysis(Analysis):
 
                     if len(tmp_uses) <= 2:
                         tmp_used, tmp_use_stmtidx = next(iter(tmp_uses))
-                        if is_const_vvar_load_dirty_assignment(stmt) and not any(
-                            isinstance(stmt_, Store)
-                            for stmt_ in block.statements[tmp_def_stmtidx + 1 : tmp_use_stmtidx]
-                        ):
-                            # we can propagate this load because there is no store between its def and use
-                            replacements[
-                                CodeLocation(block_loc.block_addr, tmp_use_stmtidx, block_idx=block_loc.block_idx)
-                            ][tmp_used] = stmt.src
-                            continue
+                        if is_const_vvar_load_dirty_assignment(stmt):
+                            same_inst = (
+                                block.statements[tmp_def_stmtidx].ins_addr == block.statements[tmp_use_stmtidx].ins_addr
+                            )
+                            has_store = any(
+                                isinstance(stmt_, Store)
+                                for stmt_ in block.statements[tmp_def_stmtidx + 1 : tmp_use_stmtidx]
+                            )
+                            if same_inst or not has_store:
+                                # we can propagate this load because either we do not consider memory aliasing problem
+                                # within the same instruction (blocks must be originally lifted with
+                                # CROSS_INSN_OPT=False), or there is no store between its def and use.
+                                replacements[
+                                    CodeLocation(block_loc.block_addr, tmp_use_stmtidx, block_idx=block_loc.block_idx)
+                                ][tmp_used] = stmt.src
+                                continue
 
         self.model.replacements = replacements
 

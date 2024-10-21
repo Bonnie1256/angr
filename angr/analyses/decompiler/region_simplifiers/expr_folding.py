@@ -10,8 +10,8 @@ from ailment.expression import ITE
 from ailment.statement import Statement, Assignment, Call
 
 from angr.utils.ail import is_phi_assignment
-from ..sequence_walker import SequenceWalker
-from ..structuring.structurer_nodes import (
+from angr.analyses.decompiler.sequence_walker import SequenceWalker
+from angr.analyses.decompiler.structuring.structurer_nodes import (
     ConditionNode,
     ConditionalBreakNode,
     LoopNode,
@@ -395,6 +395,10 @@ class ExpressionReplacer(AILBlockWalker):
 
     def _handle_Assignment(self, stmt_idx: int, stmt: Assignment, block: Block | None):
         # override the base handler and make sure we do not replace .dst with a Call expression or an ITE expression
+
+        if is_phi_assignment(stmt):
+            return None
+
         changed = False
 
         dst = self._handle_expr(0, stmt.dst, stmt_idx, stmt, block)

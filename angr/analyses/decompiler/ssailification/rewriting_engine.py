@@ -1,9 +1,8 @@
 # pylint:disable=no-self-use,unused-argument
 from __future__ import annotations
-from typing import Any
 import logging
 
-from ailment.statement import Statement, Assignment, Store, Call, Return, ConditionalJump
+from ailment.statement import Statement, Assignment, Store, Call, Return, ConditionalJump, DirtyStatement
 from ailment.expression import (
     Expression,
     Register,
@@ -18,6 +17,8 @@ from ailment.expression import (
     StackBaseOffset,
     VEXCCallExpression,
     ITE,
+    Tmp,
+    DirtyExpression,
 )
 
 from angr.utils.ssa import get_reg_offset_base_and_size
@@ -51,6 +52,7 @@ class SimEngineSSARewriting(
         ail_manager=None,
         vvar_id_start: int = 0,
         bp_as_gpr: bool = False,
+        rewrite_tmps: bool = False,
     ):
         super().__init__()
 
@@ -58,10 +60,11 @@ class SimEngineSSARewriting(
         self.project = project
         self.sp_tracker = sp_tracker
         self.bp_as_gpr = bp_as_gpr
-        self.def_to_vvid: dict[Any, int] = {}
+        self.def_to_vvid: dict[tuple[int, int | None, int, Expression | Statement], int] = {}
         self.stackvar_locs = stackvar_locs
         self.udef_to_phiid = udef_to_phiid
         self.phiid_to_loc = phiid_to_loc
+        self.rewrite_tmps = rewrite_tmps
         self.ail_manager = ail_manager
 
         self._current_vvar_id = vvar_id_start
@@ -97,9 +100,11 @@ class SimEngineSSARewriting(
                 self.state.registers[stmt.dst.reg_offset][stmt.dst.size] = stmt.dst
             elif stmt.dst.category == VirtualVariableCategory.STACK:
                 self.state.stackvars[stmt.dst.stack_offset][stmt.dst.size] = stmt.dst
+            elif stmt.dst.category == VirtualVariableCategory.TMP:
+                self.state.tmps[stmt.dst.tmp_idx] = stmt.dst
             new_dst = None
         else:
-            new_dst = self._replace_def_expr(stmt.dst)
+            new_dst = self._replace_def_expr(self.block.addr, self.block.idx, self.stmt_idx, stmt.dst)
 
         stmt_base_reg = None
         if new_dst is not None:
@@ -124,7 +129,9 @@ class SimEngineSSARewriting(
                         **stmt.dst.tags,
                     )
                     existing_base_reg_vvar = self._replace_use_reg(base_reg_expr)
-                    base_reg_vvar = self._replace_def_expr(base_reg_expr)
+                    base_reg_vvar = self._replace_def_expr(
+                        self.block.addr, self.block.idx, self.stmt_idx, base_reg_expr
+                    )
                     stmt_base_reg = Assignment(
                         self.ail_manager.next_atom(),
                         base_reg_vvar,
@@ -134,6 +141,8 @@ class SimEngineSSARewriting(
                         **stmt.tags,
                     )
                     self.state.registers[base_offset][base_size] = base_reg_vvar
+            elif isinstance(stmt.dst, Tmp):
+                pass
             else:
                 raise NotImplementedError
 
@@ -151,7 +160,7 @@ class SimEngineSSARewriting(
 
     def _handle_Store(self, stmt: Store) -> Store | Assignment | None:
         new_data = self._expr(stmt.data)
-        vvar = self._replace_def_store(stmt)
+        vvar = self._replace_def_store(self.block.addr, self.block.idx, self.stmt_idx, stmt)
         if vvar is not None:
             return Assignment(stmt.idx, vvar, stmt.data if new_data is None else new_data, **stmt.tags)
 
@@ -189,9 +198,19 @@ class SimEngineSSARewriting(
         return None
 
     def _handle_Call(self, stmt: Call) -> Call | None:
-        new_target = self._replace_use_reg(stmt.target) if isinstance(stmt.target, Register) else None
-        new_ret_expr = self._replace_def_expr(stmt.ret_expr) if stmt.ret_expr is not None else None
-        new_fp_ret_expr = self._replace_def_expr(stmt.fp_ret_expr) if stmt.fp_ret_expr is not None else None
+        changed = False
+
+        new_target = self._replace_use_expr(stmt.target)
+        new_ret_expr = (
+            self._replace_def_expr(self.block.addr, self.block.idx, self.stmt_idx, stmt.ret_expr)
+            if stmt.ret_expr is not None
+            else None
+        )
+        new_fp_ret_expr = (
+            self._replace_def_expr(self.block.addr, self.block.idx, self.stmt_idx, stmt.fp_ret_expr)
+            if stmt.fp_ret_expr is not None
+            else None
+        )
 
         cc = stmt.calling_convention if stmt.calling_convention is not None else self.project.factory.cc()
         if cc is not None:
@@ -211,21 +230,49 @@ class SimEngineSSARewriting(
             self._clear_aliasing_regs(stmt.fp_ret_expr.reg_offset, stmt.fp_ret_expr.size)
             self.state.registers[stmt.fp_ret_expr.reg_offset][stmt.fp_ret_expr.size] = new_fp_ret_expr
 
+        new_args = None
+        if stmt.args is not None:
+            new_args = []
+            for arg in stmt.args:
+                new_arg = self._expr(arg)
+                if new_arg is not None:
+                    changed = True
+                    new_args.append(new_arg)
+                else:
+                    new_args.append(arg)
+
         if new_target is not None or new_ret_expr is not None or new_fp_ret_expr is not None:
+            changed = True
+
+        if changed:
             return Call(
                 stmt.idx,
                 stmt.target if new_target is None else new_target,
                 calling_convention=stmt.calling_convention,
                 prototype=stmt.prototype,
-                args=stmt.args,
+                args=new_args,
                 ret_expr=stmt.ret_expr if new_ret_expr is None else new_ret_expr,
                 fp_ret_expr=stmt.fp_ret_expr if new_fp_ret_expr is None else new_fp_ret_expr,
+                bits=stmt.bits,
                 **stmt.tags,
             )
         return None
 
+    _handle_CallExpr = _handle_Call
+
+    def _handle_DirtyStatement(self, stmt: DirtyStatement) -> DirtyStatement | None:
+        dirty = self._expr(stmt.dirty)
+        if dirty is None or dirty is stmt.dirty:
+            return None
+        return DirtyStatement(stmt.idx, dirty, **stmt.tags)
+
     def _handle_Register(self, expr: Register) -> VirtualVariable | None:
         return self._replace_use_reg(expr)
+
+    def _handle_Tmp(self, expr: Tmp) -> VirtualVariable | None:
+        return (
+            self._replace_use_tmp(self.block.addr, self.block.idx, self.stmt_idx, expr) if self.rewrite_tmps else None
+        )
 
     def _handle_Load(self, expr: Load) -> Load | VirtualVariable | None:
         if isinstance(expr.addr, StackBaseOffset) and isinstance(expr.addr.offset, int):
@@ -341,13 +388,42 @@ class SimEngineSSARewriting(
                 new_operands.append(operand)
 
         if updated:
-            return VEXCCallExpression(expr.idx, expr.cee_name, new_operands, bits=expr.bits, **expr.tags)
+            return VEXCCallExpression(expr.idx, expr.callee, new_operands, bits=expr.bits, **expr.tags)
+        return None
+
+    def _handle_DirtyExpression(self, expr: DirtyExpression) -> DirtyExpression | None:
+        updated = False
+        new_operands = []
+        for operand in expr.operands:
+            new_operand = self._expr(operand)
+            if new_operand is not None:
+                updated = True
+                new_operands.append(new_operand)
+            else:
+                new_operands.append(operand)
+
+        new_guard = None
+        if expr.guard is not None:
+            new_guard = self._expr(expr.guard)
+            if new_guard is not None:
+                updated = True
+
+        if updated:
+            return DirtyExpression(
+                expr.idx,
+                expr.callee,
+                new_operands,
+                guard=new_guard,
+                mfx=expr.mfx,
+                maddr=expr.maddr,
+                msize=expr.msize,
+                bits=expr.bits,
+                **expr.tags,
+            )
         return None
 
     def _handle_Dummy(self, expr) -> None:
         return None
-
-    _handle_DirtyExpression = _handle_Dummy
 
     #
     # Expression replacement
@@ -417,23 +493,29 @@ class SimEngineSSARewriting(
             **new_base_expr.tags,
         )
 
-    def _replace_def_expr(self, thing: Expression | Statement) -> VirtualVariable | None:
+    def _replace_def_expr(
+        self, block_addr: int, block_idx: int | None, stmt_idx: int, thing: Expression | Statement
+    ) -> VirtualVariable | None:
         """
         Return a new virtual variable for the given defined expression.
         """
         if isinstance(thing, Register):
-            return self._replace_def_reg(thing)
+            return self._replace_def_reg(block_addr, block_idx, stmt_idx, thing)
         if isinstance(thing, Store):
-            return self._replace_def_store(thing)
+            return self._replace_def_store(block_addr, block_idx, stmt_idx, thing)
+        if isinstance(thing, Tmp) and self.rewrite_tmps:
+            return self._replace_def_tmp(block_addr, block_idx, stmt_idx, thing)
         return None
 
-    def _replace_def_reg(self, expr: Register) -> VirtualVariable:
+    def _replace_def_reg(
+        self, block_addr: int, block_idx: int | None, stmt_idx: int, expr: Register
+    ) -> VirtualVariable:
         """
         Return a new virtual variable for the given defined register.
         """
 
         # get the virtual variable ID
-        vvid = self.get_vvid_by_def(expr)
+        vvid = self.get_vvid_by_def(block_addr, block_idx, stmt_idx, expr)
         return VirtualVariable(
             expr.idx,
             vvid,
@@ -464,14 +546,16 @@ class SimEngineSSARewriting(
             return vvar
         return self.state.registers[base_off][base_size]
 
-    def _replace_def_store(self, stmt: Store) -> VirtualVariable | None:
+    def _replace_def_store(
+        self, block_addr: int, block_idx: int | None, stmt_idx: int, stmt: Store
+    ) -> VirtualVariable | None:
         if (
             isinstance(stmt.addr, StackBaseOffset)
             and isinstance(stmt.addr.offset, int)
             and stmt.addr.offset in self.stackvar_locs
             and stmt.size == self.stackvar_locs[stmt.addr.offset]
         ):
-            vvar_id = self.get_vvid_by_def(stmt)
+            vvar_id = self.get_vvid_by_def(block_addr, block_idx, stmt_idx, stmt)
             vvar = VirtualVariable(
                 self.ail_manager.next_atom(),
                 vvar_id,
@@ -482,6 +566,31 @@ class SimEngineSSARewriting(
             )
             self.state.stackvars[stmt.addr.offset][stmt.size] = vvar
             return vvar
+        return None
+
+    def _replace_def_tmp(self, block_addr: int, block_idx: int | None, stmt_idx: int, expr: Tmp) -> VirtualVariable:
+        vvid = self.get_vvid_by_def(block_addr, block_idx, stmt_idx, expr)
+        vvar = VirtualVariable(
+            expr.idx,
+            vvid,
+            expr.bits,
+            VirtualVariableCategory.TMP,
+            oident=expr.tmp_idx,
+            **expr.tags,
+        )
+        self.state.tmps[expr.tmp_idx] = vvar
+        return vvar
+
+    def _replace_use_expr(self, thing: Expression | Statement) -> VirtualVariable | None:
+        """
+        Return a new virtual variable for the given defined expression.
+        """
+        if isinstance(thing, Register):
+            return self._replace_use_reg(thing)
+        if isinstance(thing, Store):
+            raise NotImplementedError("Store expressions are not supported in _replace_use_expr.")
+        if isinstance(thing, Tmp) and self.rewrite_tmps:
+            return self._replace_use_tmp(self.block.addr, self.block.idx, self.stmt_idx, thing)
         return None
 
     def _replace_use_reg(self, reg_expr: Register) -> VirtualVariable | Expression:
@@ -556,7 +665,8 @@ class SimEngineSSARewriting(
             and expr.size == self.stackvar_locs[expr.addr.offset]
         ):
             if expr.size not in self.state.stackvars[expr.addr.offset]:
-                vvar_id = self.get_vvid_by_def(expr)
+                # create it on the fly
+                vvar_id = self.get_vvid_by_def(self.block.addr, self.block.idx, self.stmt_idx, expr)
                 return VirtualVariable(
                     self.ail_manager.next_atom(),
                     vvar_id,
@@ -579,15 +689,31 @@ class SimEngineSSARewriting(
             )
         return None
 
+    def _replace_use_tmp(self, block_addr: int, block_idx: int | None, stmt_idx: int, expr: Tmp) -> VirtualVariable:
+        vvar = self.state.tmps.get(expr.tmp_idx)
+        if vvar is None:
+            return self._replace_def_tmp(block_addr, block_idx, stmt_idx, expr)
+        return VirtualVariable(
+            expr.idx,
+            vvar.varid,
+            vvar.bits,
+            VirtualVariableCategory.TMP,
+            oident=expr.tmp_idx,
+            **expr.tags,
+        )
+
     #
     # Utils
     #
 
-    def get_vvid_by_def(self, thing: Expression | Statement) -> int:
-        if thing in self.def_to_vvid:
-            return self.def_to_vvid[thing]
+    def get_vvid_by_def(
+        self, block_addr: int, block_idx: int | None, stmt_idx: int, thing: Expression | Statement
+    ) -> int:
+        key = block_addr, block_idx, stmt_idx, thing
+        if key in self.def_to_vvid:
+            return self.def_to_vvid[key]
         vvid = self.next_vvar_id()
-        self.def_to_vvid[thing] = vvid
+        self.def_to_vvid[key] = vvid
         return vvid
 
     def _clear_aliasing_regs(self, reg_offset: int, size: int, remove_base_reg: bool = True) -> None:

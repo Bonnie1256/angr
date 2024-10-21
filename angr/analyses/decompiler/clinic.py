@@ -13,13 +13,13 @@ import capstone
 import ailment
 
 from angr.errors import AngrDecompilationError
-from ...knowledge_base import KnowledgeBase
-from ...knowledge_plugins.functions import Function
-from ...knowledge_plugins.cfg.memory_data import MemoryDataSort
-from ...codenode import BlockNode
-from ...utils import timethis
-from ...calling_conventions import SimRegArg, SimStackArg, SimFunctionArgument
-from ...sim_type import (
+from angr.knowledge_base import KnowledgeBase
+from angr.knowledge_plugins.functions import Function
+from angr.knowledge_plugins.cfg.memory_data import MemoryDataSort
+from angr.codenode import BlockNode
+from angr.utils import timethis
+from angr.calling_conventions import SimRegArg, SimStackArg, SimFunctionArgument
+from angr.sim_type import (
     SimTypeChar,
     SimTypeInt,
     SimTypeLongLong,
@@ -29,13 +29,13 @@ from ...sim_type import (
     SimTypeFloat,
     SimTypePointer,
 )
-from ..stack_pointer_tracker import Register, OffsetVal
-from ...sim_variable import SimVariable, SimStackVariable, SimRegisterVariable, SimMemoryVariable
-from ...procedures.stubs.UnresolvableCallTarget import UnresolvableCallTarget
-from ...procedures.stubs.UnresolvableJumpTarget import UnresolvableJumpTarget
-from .. import Analysis, register_analysis
-from ..cfg.cfg_base import CFGBase
-from ..reaching_definitions import ReachingDefinitionsAnalysis
+from angr.analyses.stack_pointer_tracker import Register, OffsetVal
+from angr.sim_variable import SimVariable, SimStackVariable, SimRegisterVariable, SimMemoryVariable
+from angr.procedures.stubs.UnresolvableCallTarget import UnresolvableCallTarget
+from angr.procedures.stubs.UnresolvableJumpTarget import UnresolvableJumpTarget
+from angr.analyses import Analysis, register_analysis
+from angr.analyses.cfg.cfg_base import CFGBase
+from angr.analyses.reaching_definitions import ReachingDefinitionsAnalysis
 from .return_maker import ReturnMaker
 from .ailgraph_walker import AILGraphWalker, RemoveNodeNotice
 from .optimization_passes import (
@@ -110,6 +110,7 @@ class Clinic(Analysis):
         inlined_counts: dict[int, int] | None = None,
         inlining_parents: set[int] | None = None,
         vvar_id_start: int = 0,
+        optimization_scratch: dict[str, Any] | None = None,
     ):
         if not func.normalized and mode == ClinicMode.DECOMPILE:
             raise ValueError("Decompilation must work on normalized function graphs.")
@@ -124,6 +125,7 @@ class Clinic(Analysis):
         self.variable_kb = variable_kb
         self.externs: set[SimMemoryVariable] = set()
         self.data_refs: dict[int, int] = {}  # data address to instruction address
+        self.optimization_scratch = optimization_scratch if optimization_scratch is not None else {}
 
         self._func_graph: networkx.DiGraph | None = None
         self._ail_manager = None
@@ -749,8 +751,9 @@ class Clinic(Analysis):
                 continue
 
             call_sites = []
-            for pred in self.function.transition_graph.predecessors(node):
-                call_sites.append(pred)
+            for pred, _, data in self.function.transition_graph.in_edges(node, data=True):
+                if data.get("type", None) != "return":
+                    call_sites.append(pred)
             # case 1: calling conventions and prototypes are available at every single call site
             if call_sites and all(self.kb.callsite_prototypes.has_prototype(callsite.addr) for callsite in call_sites):
                 continue
@@ -918,10 +921,16 @@ class Clinic(Analysis):
             "Ijk_Sys"
         ):
             # we don't support lifting this block. use a dummy block instead
+            dirty_expr = ailment.Expr.DirtyExpression(
+                self._ail_manager.next_atom,
+                f"Unsupported jumpkind {block.vex.jumpkind} at address {block_node.addr}",
+                [],
+                bits=0,
+            )
             statements = [
                 ailment.Stmt.DirtyStatement(
                     self._ail_manager.next_atom(),
-                    f"Unsupported jumpkind {block.vex.jumpkind} at address {block_node.addr}",
+                    dirty_expr,
                     ins_addr=block_node.addr,
                 )
             ]
@@ -1218,6 +1227,7 @@ class Clinic(Analysis):
                 variable_kb=variable_kb,
                 vvar_id_start=self.vvar_id_start,
                 entry_node_addr=self.entry_node_addr,
+                scratch=self.optimization_scratch,
                 **kwargs,
             )
             if a.out_graph:
@@ -1255,6 +1265,7 @@ class Clinic(Analysis):
                 ailment.Expr.VirtualVariableCategory.PARAMETER,
                 oident=arg.reg,
                 ins_addr=self.function.addr,
+                vex_block_addr=self.function.addr,
             )
             self.vvar_id_start += 1
             arg_vvars[arg_vvar.varid] = arg_vvar, arg
@@ -1268,6 +1279,7 @@ class Clinic(Analysis):
                     False,
                     arg_vvar,
                     ins_addr=self.function.addr,
+                    vex_block_addr=self.function.addr,
                 )
 
             fullreg_dst = ailment.Expr.Register(
@@ -1276,12 +1288,14 @@ class Clinic(Analysis):
                 basereg_offset,
                 basereg_size * self.project.arch.byte_width,
                 ins_addr=self.function.addr,
+                vex_block_addr=self.function.addr,
             )
             stmt = ailment.Stmt.Assignment(
                 self._ail_manager.next_atom(),
                 fullreg_dst,
                 arg_vvar,
                 ins_addr=self.function.addr,
+                vex_block_addr=self.function.addr,
             )
             new_stmts.append(stmt)
 
@@ -1312,6 +1326,7 @@ class Clinic(Analysis):
             ail_graph,
             entry=next(iter(bb for bb in ail_graph if (bb.addr, bb.idx) == self.entry_node_addr)),
             ail_manager=self._ail_manager,
+            ssa_tmps=True,
             ssa_stackvars=True,
             vvar_id_start=self.vvar_id_start,
         )
@@ -1790,6 +1805,18 @@ class Clinic(Analysis):
 
         elif isinstance(expr, ailment.Stmt.Call):
             self._link_variables_on_call(variable_manager, global_variables, block, stmt_idx, expr, is_expr=True)
+
+        elif isinstance(expr, ailment.Expr.VEXCCallExpression):
+            for operand in expr.operands:
+                self._link_variables_on_expr(variable_manager, global_variables, block, stmt_idx, stmt, operand)
+
+        elif isinstance(expr, ailment.Expr.DirtyExpression):
+            for operand in expr.operands:
+                self._link_variables_on_expr(variable_manager, global_variables, block, stmt_idx, stmt, operand)
+            if expr.maddr:
+                self._link_variables_on_expr(variable_manager, global_variables, block, stmt_idx, stmt, expr.maddr)
+            if expr.guard:
+                self._link_variables_on_expr(variable_manager, global_variables, block, stmt_idx, stmt, expr.guard)
 
     def _function_graph_to_ail_graph(self, func_graph, blocks_by_addr_and_size=None):
         if blocks_by_addr_and_size is None:

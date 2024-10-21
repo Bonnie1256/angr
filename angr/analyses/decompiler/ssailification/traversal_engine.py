@@ -2,7 +2,7 @@ from __future__ import annotations
 from collections import OrderedDict
 
 from ailment.statement import Assignment, Call, Store, ConditionalJump
-from ailment.expression import Register, BinaryOp, StackBaseOffset, ITE, VEXCCallExpression
+from ailment.expression import Register, BinaryOp, StackBaseOffset, ITE, VEXCCallExpression, Tmp, DirtyExpression
 
 from angr.engines.light import SimEngineLight, SimEngineLightAILMixin
 from angr.utils.ssa import get_reg_offset_base
@@ -21,7 +21,14 @@ class SimEngineSSATraversal(
     state: TraversalState
 
     def __init__(
-        self, arch, sp_tracker=None, bp_as_gpr: bool = False, def_to_loc=None, loc_to_defs=None, stackvars: bool = False
+        self,
+        arch,
+        sp_tracker=None,
+        bp_as_gpr: bool = False,
+        def_to_loc=None,
+        loc_to_defs=None,
+        stackvars: bool = False,
+        tmps: bool = False,
     ):
         super().__init__()
 
@@ -29,14 +36,15 @@ class SimEngineSSATraversal(
         self.sp_tracker = sp_tracker
         self.bp_as_gpr = bp_as_gpr
         self.stackvars = stackvars
+        self.tmps = tmps
 
-        self.def_to_loc = def_to_loc if def_to_loc is not None else OrderedDict()
+        self.def_to_loc = def_to_loc if def_to_loc is not None else []
         self.loc_to_defs = loc_to_defs if loc_to_defs is not None else OrderedDict()
 
     def _handle_Assignment(self, stmt: Assignment):
         if isinstance(stmt.dst, Register):
             codeloc = self._codeloc()
-            self.def_to_loc[stmt.dst] = codeloc
+            self.def_to_loc.append((stmt.dst, codeloc))
             if codeloc not in self.loc_to_defs:
                 self.loc_to_defs[codeloc] = OrderedSet()
             self.loc_to_defs[codeloc].add(stmt.dst)
@@ -52,7 +60,7 @@ class SimEngineSSATraversal(
 
         if self.stackvars and isinstance(stmt.addr, StackBaseOffset) and isinstance(stmt.addr.offset, int):
             codeloc = self._codeloc()
-            self.def_to_loc[stmt] = codeloc
+            self.def_to_loc.append((stmt, codeloc))
             if codeloc not in self.loc_to_defs:
                 self.loc_to_defs[codeloc] = OrderedSet()
             self.loc_to_defs[codeloc].add(stmt)
@@ -69,7 +77,7 @@ class SimEngineSSATraversal(
     def _handle_Call(self, stmt: Call):
         if stmt.ret_expr is not None and isinstance(stmt.ret_expr, Register):
             codeloc = self._codeloc()
-            self.def_to_loc[stmt.ret_expr] = codeloc
+            self.def_to_loc.append((stmt.ret_expr, codeloc))
             if codeloc not in self.loc_to_defs:
                 self.loc_to_defs[codeloc] = OrderedSet()
             self.loc_to_defs[codeloc].add(stmt.ret_expr)
@@ -79,17 +87,29 @@ class SimEngineSSATraversal(
 
         super()._ail_handle_Call(stmt)
 
+    _handle_CallExpr = _handle_Call
+
     def _handle_Register(self, expr: Register):
         base_offset = get_reg_offset_base(expr.reg_offset, self.arch)
 
         if base_offset not in self.state.live_registers:
             codeloc = self._codeloc()
-            self.def_to_loc[expr] = codeloc
+            self.def_to_loc.append((expr, codeloc))
             if codeloc not in self.loc_to_defs:
                 self.loc_to_defs[codeloc] = OrderedSet()
             self.loc_to_defs[codeloc].add(expr)
 
             self.state.live_registers.add(base_offset)
+
+    def _handle_Tmp(self, expr: Tmp):
+        if self.tmps:
+            codeloc = self._codeloc()
+            self.def_to_loc.append((expr, codeloc))
+            if codeloc not in self.loc_to_defs:
+                self.loc_to_defs[codeloc] = OrderedSet()
+            self.loc_to_defs[codeloc].add(expr)
+
+            self.state.live_tmps.add(expr.tmp_idx)
 
     def _handle_Cmp(self, expr: BinaryOp):
         self._expr(expr.operands[0])
@@ -123,9 +143,16 @@ class SimEngineSSATraversal(
         for operand in expr.operands:
             self._expr(operand)
 
+    def _handle_DirtyExpression(self, expr: DirtyExpression):
+        for operand in expr.operands:
+            self._expr(operand)
+        if expr.guard is not None:
+            self._expr(expr.guard)
+        if expr.maddr is not None:
+            self._expr(expr.maddr)
+
     def _handle_Dummy(self, expr):
         pass
 
     _handle_VirtualVariable = _handle_Dummy
     _handle_Phi = _handle_Dummy
-    _handle_DirtyExpression = _handle_Dummy

@@ -10,8 +10,8 @@ from ailment import Block, Expr, Stmt, Tmp
 from ailment.expression import StackBaseOffset, BinaryOp
 from unique_log_filter import UniqueLogFilter
 
-from ....procedures import SIM_LIBRARIES, SIM_TYPE_COLLECTIONS
-from ....sim_type import (
+from angr.procedures import SIM_LIBRARIES, SIM_TYPE_COLLECTIONS
+from angr.sim_type import (
     SimTypeLongLong,
     SimTypeInt,
     SimTypeShort,
@@ -34,17 +34,17 @@ from ....sim_type import (
     SimTypeInt128,
     SimTypeInt256,
 )
-from ....knowledge_plugins.functions import Function
-from ....sim_variable import SimVariable, SimTemporaryVariable, SimStackVariable, SimMemoryVariable
-from ....utils.constants import is_alignment_mask
-from ....utils.library import get_cpp_function_name
-from ....utils.loader import is_in_readonly_segment, is_in_readonly_section
-from ..utils import structured_node_is_simple_return
-from ....errors import UnsupportedNodeTypeError, AngrRuntimeError
-from ....knowledge_plugins.cfg.memory_data import MemoryData, MemoryDataSort
-from ... import Analysis, register_analysis
-from ..region_identifier import MultiNode
-from ..structuring.structurer_nodes import (
+from angr.knowledge_plugins.functions import Function
+from angr.sim_variable import SimVariable, SimTemporaryVariable, SimStackVariable, SimMemoryVariable
+from angr.utils.constants import is_alignment_mask
+from angr.utils.library import get_cpp_function_name
+from angr.utils.loader import is_in_readonly_segment, is_in_readonly_section
+from angr.analyses.decompiler.utils import structured_node_is_simple_return
+from angr.errors import UnsupportedNodeTypeError, AngrRuntimeError
+from angr.knowledge_plugins.cfg.memory_data import MemoryData, MemoryDataSort
+from angr.analyses import Analysis, register_analysis
+from angr.analyses.decompiler.region_identifier import MultiNode
+from angr.analyses.decompiler.structuring.structurer_nodes import (
     SequenceNode,
     CodeNode,
     ConditionNode,
@@ -1408,7 +1408,7 @@ class CUnsupportedStatement(CStatement):
 class CDirtyStatement(CExpression):
     __slots__ = ("dirty",)
 
-    def __init__(self, dirty, **kwargs):
+    def __init__(self, dirty: CDirtyExpression, **kwargs):
         super().__init__(**kwargs)
         self.dirty = dirty
 
@@ -1420,7 +1420,7 @@ class CDirtyStatement(CExpression):
         indent_str = self.indent_str(indent=indent)
 
         yield indent_str, None
-        yield str(self.dirty), None
+        yield from self.dirty.c_repr_chunks()
         yield "\n", None
 
 
@@ -2303,6 +2303,38 @@ class CMultiStatementExpression(CExpression):
         yield ")", paren
 
 
+class CVEXCCallExpression(CExpression):
+    """
+    ccall_name(arg0, arg1, ...)
+    """
+
+    __slots__ = (
+        "callee",
+        "operands",
+        "tags",
+    )
+
+    def __init__(self, callee: str, operands: list[CExpression], tags=None, **kwargs):
+        super().__init__(**kwargs)
+        self.callee = callee
+        self.operands = operands
+        self.tags = tags
+
+    @property
+    def type(self):
+        return SimTypeInt().with_arch(self.codegen.project.arch)
+
+    def c_repr_chunks(self, indent=0, asexpr=False):
+        paren = CClosingObject("(")
+        yield f"{self.callee}", self
+        yield "(", paren
+        for idx, operand in enumerate(self.operands):
+            if idx != 0:
+                yield ", ", None
+            yield from operand.c_repr_chunks()
+        yield ")", paren
+
+
 class CDirtyExpression(CExpression):
     """
     Ideally all dirty expressions should be handled and converted to proper conversions during conversion from VEX to
@@ -2424,6 +2456,7 @@ class CStructuredCodeGenerator(BaseStructuredCodeGenerator, Analysis):
             Expr.BinaryOp: self._handle_Expr_BinaryOp,
             Expr.Convert: self._handle_Expr_Convert,
             Expr.StackBaseOffset: self._handle_Expr_StackBaseOffset,
+            Expr.VEXCCallExpression: self._handle_Expr_VEXCCallExpression,
             Expr.DirtyExpression: self._handle_Expr_Dirty,
             Expr.ITE: self._handle_Expr_ITE,
             Expr.Reinterpret: self._handle_Reinterpret,
@@ -3318,7 +3351,8 @@ class CStructuredCodeGenerator(BaseStructuredCodeGenerator, Analysis):
         return clabel
 
     def _handle_Stmt_Dirty(self, stmt: Stmt.DirtyStatement, **kwargs):
-        return CDirtyStatement(stmt, codegen=self)
+        dirty = self._handle(stmt.dirty)
+        return CDirtyStatement(dirty, codegen=self)
 
     #
     # AIL expression handlers
@@ -3519,7 +3553,11 @@ class CStructuredCodeGenerator(BaseStructuredCodeGenerator, Analysis):
 
         return CTypeCast(None, dst_type.with_arch(self.project.arch), child, tags=expr.tags, codegen=self)
 
-    def _handle_Expr_Dirty(self, expr, **kwargs):
+    def _handle_Expr_VEXCCallExpression(self, expr: Expr.VEXCCallExpression, **kwargs):
+        operands = [self._handle(arg) for arg in expr.operands]
+        return CVEXCCallExpression(expr.callee, operands, tags=expr.tags, codegen=self)
+
+    def _handle_Expr_Dirty(self, expr: Expr.DirtyExpression, **kwargs):
         return CDirtyExpression(expr, codegen=self)
 
     def _handle_Expr_ITE(self, expr: Expr.ITE, **kwargs):

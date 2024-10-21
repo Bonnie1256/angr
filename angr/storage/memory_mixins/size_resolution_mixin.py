@@ -3,8 +3,8 @@ import logging
 
 import claripy
 
-from . import MemoryMixin
-from ...errors import SimMemoryLimitError, SimMemoryError, SimUnsatError
+from angr.errors import SimMemoryLimitError, SimMemoryError, SimUnsatError
+from angr.storage.memory_mixins.memory_mixin import MemoryMixin
 
 l = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ class SizeConcretizationMixin(MemoryMixin):
         out_size = self.state.solver.max(size)
         return super().load(addr, size=out_size, **kwargs)
 
-    def store(self, addr, data, size=None, condition=None, **kwargs):
+    def store(self, addr, data, size=None, *, condition=None, **kwargs):
         if getattr(size, "op", "BVV") == "BVV":
             super().store(addr, data, size=size, condition=condition, **kwargs)
             return

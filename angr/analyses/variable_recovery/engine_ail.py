@@ -9,11 +9,11 @@ from unique_log_filter import UniqueLogFilter
 
 from angr.procedures import SIM_LIBRARIES, SIM_TYPE_COLLECTIONS
 from angr.utils.constants import MAX_POINTSTO_BITS
-from ...calling_conventions import SimRegArg
-from ...sim_type import SimTypeFunction, dereference_simtype
-from ...engines.light import SimEngineLightAILMixin
-from ..typehoon import typeconsts, typevars
-from ..typehoon.lifter import TypeLifter
+from angr.calling_conventions import SimRegArg
+from angr.sim_type import SimTypeFunction, dereference_simtype
+from angr.engines.light import SimEngineLightAILMixin
+from angr.analyses.typehoon import typeconsts, typevars
+from angr.analyses.typehoon.lifter import TypeLifter
 from .engine_base import SimEngineVRBase, RichR
 
 if TYPE_CHECKING:
@@ -222,6 +222,20 @@ class SimEngineVRAIL(
         if stmt.ret_exprs:
             for ret_expr in stmt.ret_exprs:
                 self._expr(ret_expr)
+
+    def _ail_handle_DirtyExpression(self, expr: ailment.Expr.DirtyExpression) -> RichR:
+        for op in expr.operands:
+            self._expr(op)
+        if expr.guard:
+            self._expr(expr.guard)
+        if expr.maddr:
+            self._expr(expr.maddr)
+        return RichR(self.state.top(expr.bits))
+
+    def _ail_handle_VEXCCallExpression(self, expr: ailment.Expr.VEXCCallExpression) -> RichR:
+        for op in expr.operands:
+            self._expr(op)
+        return RichR(self.state.top(expr.bits))
 
     # Expression handlers
 

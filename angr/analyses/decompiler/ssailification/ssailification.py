@@ -5,8 +5,8 @@ from collections import defaultdict
 from itertools import count
 from bisect import bisect_left
 
-from ailment.expression import Register, StackBaseOffset
-from ailment.statement import Store
+from ailment.expression import Expression, Register, StackBaseOffset, Tmp
+from ailment.statement import Statement, Store
 
 from angr.knowledge_plugins.functions import Function
 from angr.code_location import CodeLocation
@@ -33,6 +33,7 @@ class Ssailification(Analysis):  # pylint:disable=abstract-method
         func_addr: int | None = None,
         ail_manager=None,
         ssa_stackvars: bool = False,
+        ssa_tmps: bool = False,
         vvar_id_start: int = 0,
     ):
         """
@@ -51,6 +52,7 @@ class Ssailification(Analysis):  # pylint:disable=abstract-method
         self._func_addr = func_addr
         self._ail_manager = ail_manager
         self._ssa_stackvars = ssa_stackvars
+        self._ssa_tmps = ssa_tmps
         self._entry = (
             entry
             if entry is not None
@@ -68,6 +70,7 @@ class Ssailification(Analysis):  # pylint:disable=abstract-method
             stack_pointer_tracker,
             bp_as_gpr,
             ssa_stackvars,
+            ssa_tmps,
         )
 
         # calculate virtual variables and phi nodes
@@ -86,13 +89,19 @@ class Ssailification(Analysis):  # pylint:disable=abstract-method
             self._udef_to_phiid,
             self._phiid_to_loc,
             self._stackvar_locs,
+            self._ssa_tmps,
             self._ail_manager,
             vvar_id_start=vvar_id_start,
         )
         self.out_graph = rewriter.out_graph
         self.max_vvar_id = rewriter.max_vvar_id
 
-    def _calculate_virtual_variables(self, ail_graph, def_to_loc: dict, loc_to_defs: dict[CodeLocation, Any]):
+    def _calculate_virtual_variables(
+        self,
+        ail_graph,
+        def_to_loc: list[tuple[Expression | Statement, CodeLocation]],
+        loc_to_defs: dict[CodeLocation, Any],
+    ):
         """
         Calculate the mapping from defs to virtual variables as well as where to insert phi nodes.
         """
@@ -112,7 +121,7 @@ class Ssailification(Analysis):  # pylint:disable=abstract-method
         if self._ssa_stackvars:
             # for stack variables, we collect all definitions and identify stack variable locations using heuristics
 
-            stackvar_locs = self._synthesize_stackvar_locs([def_ for def_ in def_to_loc if isinstance(def_, Store)])
+            stackvar_locs = self._synthesize_stackvar_locs([def_ for def_, _ in def_to_loc if isinstance(def_, Store)])
             sorted_stackvar_offs = sorted(stackvar_locs)
         else:
             stackvar_locs = {}
@@ -121,10 +130,8 @@ class Ssailification(Analysis):  # pylint:disable=abstract-method
         # computer phi node locations for each unified definition
         udef_to_defs = defaultdict(set)
         udef_to_blockkeys = defaultdict(set)
-        for def_ in def_to_loc:
+        for def_, loc in def_to_loc:
             if isinstance(def_, Register):
-                loc = def_to_loc[def_]
-
                 base_off, base_size = get_reg_offset_base_and_size(def_.reg_offset, self.project.arch, size=def_.size)
                 base_reg_bits = base_size * self.project.arch.byte_width
                 udef_to_defs[("reg", base_off, base_reg_bits)].add(def_)
@@ -135,8 +142,6 @@ class Ssailification(Analysis):  # pylint:disable=abstract-method
                     udef_to_defs[("reg", def_.reg_offset, reg_bits)].add((loc.block_addr, loc.block_idx))
             elif isinstance(def_, Store):
                 if isinstance(def_.addr, StackBaseOffset) and isinstance(def_.addr.offset, int):
-                    loc = def_to_loc[def_]
-
                     idx_begin = bisect_left(sorted_stackvar_offs, def_.addr.offset)
                     for i in range(idx_begin, len(sorted_stackvar_offs)):
                         off = sorted_stackvar_offs[i]
@@ -144,6 +149,9 @@ class Ssailification(Analysis):  # pylint:disable=abstract-method
                             break
                         udef_to_defs[("stack", off, stackvar_locs[off])].add(def_)
                         udef_to_blockkeys[("stack", off, stackvar_locs[off])].add((loc.block_addr, loc.block_idx))
+            elif isinstance(def_, Tmp):
+                # Tmps are local to each block and do not need phi nodes
+                pass
             else:
                 raise NotImplementedError
                 # other types are not supported yet

@@ -8,10 +8,10 @@ from ailment import Stmt, Expr, Const
 
 from angr.procedures.stubs.format_parser import FormatParser, FormatSpecifier
 from angr.sim_type import SimTypeBottom, SimTypePointer, SimTypeChar, SimTypeInt, dereference_simtype
-from angr.calling_conventions import SimRegArg, SimStackArg, SimCC, SimStructArg
+from angr.calling_conventions import SimRegArg, SimStackArg, SimCC, SimStructArg, SimComboArg
 from angr.knowledge_plugins.key_definitions.constants import OP_BEFORE
 from angr.analyses import Analysis, register_analysis
-from angr.analyses.s_reaching_definitions.s_rda import SRDAView
+from angr.analyses.s_reaching_definitions import SRDAView
 from angr import SIM_LIBRARIES, SIM_TYPE_COLLECTIONS
 
 if TYPE_CHECKING:
@@ -129,11 +129,21 @@ class CallSiteMaker(Analysis):
                         arg_locs = cc.arg_locs(callsite_ty)
 
         if arg_locs is not None:
+            expanded_arg_locs = []
             for arg_loc in arg_locs:
+                if isinstance(arg_loc, SimComboArg):
+                    # a ComboArg spans across multiple locations (mostly stack but *in theory* can also be spanning
+                    # across registers). most importantly, a ComboArg represents one variable, not multiple, but we
+                    # have no way to know that until later down the pipeline.
+                    expanded_arg_locs += arg_loc.locations
+                else:
+                    expanded_arg_locs.append(arg_loc)
+
+            for arg_loc in expanded_arg_locs:
                 if isinstance(arg_loc, SimRegArg):
                     size = arg_loc.size
                     offset = arg_loc.check_offset(cc.arch)
-                    value_and_def = self._resolve_register_argument(call_stmt, arg_loc)
+                    value_and_def = self._resolve_register_argument(arg_loc)
                     if value_and_def is not None:
                         vvar_def = value_and_def[1]
                         arg_vvars.append(vvar_def)
@@ -273,14 +283,15 @@ class CallSiteMaker(Analysis):
         l.warning("TODO: Unsupported statement type %s for definitions.", type(stmt))
         return None
 
-    def _resolve_register_argument(self, call_stmt, arg_loc) -> tuple[int | None, Expr.VirtualVariable] | None:
+    def _resolve_register_argument(self, arg_loc) -> tuple[int | None, Expr.VirtualVariable] | None:
         offset = arg_loc.check_offset(self.project.arch)
 
         if self._reaching_definitions is not None:
             # Find its definition
-            ins_addr = call_stmt.tags["ins_addr"]
             view = SRDAView(self._reaching_definitions.model)
-            vvar = view.get_reg_vvar_by_insn(offset, ins_addr, OP_BEFORE, block_idx=self.block.idx)
+            vvar = view.get_reg_vvar_by_stmt(
+                offset, self.block.addr, self.block.idx, len(self.block.statements) - 1, OP_BEFORE
+            )
 
             if vvar is not None:
                 vvar_value = view.get_vvar_value(vvar)
@@ -308,8 +319,8 @@ class CallSiteMaker(Analysis):
             if self._reaching_definitions is not None:
                 # find its definition
                 view = SRDAView(self._reaching_definitions.model)
-                vvar = view.get_stack_vvar_by_insn(
-                    sp_offset, size, call_stmt.ins_addr, OP_BEFORE, block_idx=self.block.idx
+                vvar = view.get_stack_vvar_by_stmt(
+                    sp_offset, size, self.block.addr, self.block.idx, len(self.block.statements) - 1, OP_BEFORE
                 )
                 if vvar is not None:
                     value = view.get_vvar_value(vvar)
@@ -406,7 +417,7 @@ class CallSiteMaker(Analysis):
 
             value = None
             if isinstance(arg_loc, SimRegArg):
-                value_and_def = self._resolve_register_argument(call_stmt, arg_loc)
+                value_and_def = self._resolve_register_argument(arg_loc)
                 if value_and_def is not None:
                     value = value_and_def[0]
 

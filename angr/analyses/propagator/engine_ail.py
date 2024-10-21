@@ -11,10 +11,10 @@ from angr.knowledge_plugins.propagations.prop_value import PropValue, Detail
 from angr.knowledge_plugins.key_definitions.atoms import Register
 
 from angr.code_location import ExternalCodeLocation
-from ...utils.constants import is_alignment_mask
-from ...engines.light import SimEngineLightAILMixin
-from ...sim_variable import SimStackVariable, SimMemoryVariable
-from ..reaching_definitions.reaching_definitions import OP_BEFORE, OP_AFTER
+from angr.utils.constants import is_alignment_mask
+from angr.engines.light import SimEngineLightAILMixin
+from angr.sim_variable import SimStackVariable, SimMemoryVariable
+from angr.analyses.reaching_definitions.reaching_definitions import OP_BEFORE, OP_AFTER
 from .engine_base import SimEnginePropagatorBase
 
 if TYPE_CHECKING:
@@ -740,9 +740,16 @@ class SimEnginePropagatorAIL(
         return PropValue.from_value_and_details(v, expr.size, expr, self._codeloc())
 
     def _ail_handle_DirtyExpression(self, expr: Expr.DirtyExpression) -> PropValue | None:  # pylint:disable=no-self-use
-        if isinstance(expr.dirty_expr, Expr.VEXCCallExpression):
-            for operand in expr.dirty_expr.operands:
-                _ = self._expr(operand)
+        for operand in expr.operands:
+            _ = self._expr(operand)
+
+        return PropValue.from_value_and_details(self.state.top(expr.bits), expr.size, expr, self._codeloc())
+
+    def _ail_handle_VEXCCallExpression(
+        self, expr: Expr.VEXCCallExpression
+    ) -> PropValue | None:  # pylint:disable=no-self-use
+        for operand in expr.operands:
+            _ = self._expr(operand)
 
         return PropValue.from_value_and_details(self.state.top(expr.bits), expr.size, expr, self._codeloc())
 

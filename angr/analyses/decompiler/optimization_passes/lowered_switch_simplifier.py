@@ -10,10 +10,14 @@ from ailment.statement import ConditionalJump, Label, Assignment, Jump
 from ailment.expression import Expression, BinaryOp, Const, Load
 
 from angr.utils.graph import GraphUtils
-from ..utils import first_nonlabel_nonphi_statement, remove_last_statement
-from ..structuring.structurer_nodes import IncompleteSwitchCaseHeadStatement, SequenceNode, MultiNode
+from angr.analyses.decompiler.utils import first_nonlabel_nonphi_statement, remove_last_statement
+from angr.analyses.decompiler.structuring.structurer_nodes import (
+    IncompleteSwitchCaseHeadStatement,
+    SequenceNode,
+    MultiNode,
+)
 from .optimization_pass import MultipleBlocksException, StructuringOptimizationPass
-from ..region_simplifiers.switch_cluster_simplifier import SwitchClusterFinder
+from angr.analyses.decompiler.region_simplifiers.switch_cluster_simplifier import SwitchClusterFinder
 
 if TYPE_CHECKING:
     from ailment.expression import UnaryOp, Convert
@@ -392,7 +396,16 @@ class LoweredSwitchSimplifier(StructuringOptimizationPass):
             default_case_candidates = {}
             last_comp = None
             stack = [(head, 0, 0xFFFF_FFFF_FFFF_FFFF)]
-            while stack:
+
+            # cursed: there is an infinite loop in the following loop that
+            # occurs rarely. we need to keep track of the nodes we've seen
+            # to break out of the loop.
+            # See https://github.com/angr/angr/pull/4953
+            #
+            # FIXME: the root cause should be fixed and this workaround removed
+            seen = set()
+            while stack and tuple(stack) not in seen:
+                seen.add(tuple(stack))
                 comp, min_, max_ = stack.pop(0)
                 (
                     comp_type,

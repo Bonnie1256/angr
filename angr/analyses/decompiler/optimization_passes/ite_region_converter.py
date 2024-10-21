@@ -7,8 +7,8 @@ from ailment.statement import Statement, Call, ConditionalJump, Assignment, Jump
 from ailment.expression import ITE, Const, VirtualVariable, Phi
 
 from angr.utils.ail import is_phi_assignment
-from ....utils.graph import subgraph_between_nodes
-from ..utils import remove_labels, to_ail_supergraph
+from angr.utils.graph import subgraph_between_nodes
+from angr.analyses.decompiler.utils import remove_labels, to_ail_supergraph
 from .optimization_pass import OptimizationPass, OptimizationPassStage
 
 
@@ -42,10 +42,8 @@ class ITERegionConverter(OptimizationPass):
             if not ite_assign_regions:
                 break
 
-            for region_head, region_tail, true_block, true_stmt, false_block, false_stmt in ite_assign_regions:
-                round_update |= self._convert_region_to_ternary_expr(
-                    region_head, region_tail, true_block, true_stmt, false_block, false_stmt
-                )
+            for region_head, region_tail, _, true_stmt, _, false_stmt in ite_assign_regions:
+                round_update |= self._convert_region_to_ternary_expr(region_head, region_tail, true_stmt, false_stmt)
 
             if not round_update:
                 break
@@ -188,9 +186,7 @@ class ITERegionConverter(OptimizationPass):
         self,
         region_head,
         region_tail,
-        true_block,
         true_stmt: Assignment | Call,
-        false_block,
         false_stmt: Assignment | Call,
     ):
         if region_head not in self._graph or region_tail not in self._graph:
@@ -206,6 +202,7 @@ class ITERegionConverter(OptimizationPass):
         true_stmt_src = true_stmt.src if isinstance(true_stmt, Assignment) else true_stmt
         true_stmt_dst = true_stmt.dst if isinstance(true_stmt, Assignment) else true_stmt.ret_expr
         false_stmt_src = false_stmt.src if isinstance(false_stmt, Assignment) else false_stmt
+        false_stmt_dst = false_stmt.dst if isinstance(false_stmt, Assignment) else false_stmt.ret_expr
 
         addr_obj = true_stmt_src if "ins_addr" in true_stmt_src.tags else true_stmt
         ternary_expr = ITE(
@@ -213,9 +210,7 @@ class ITERegionConverter(OptimizationPass):
             conditional_jump.condition,
             false_stmt_src,
             true_stmt_src,
-            ins_addr=addr_obj.ins_addr,
-            vex_block_addr=addr_obj.vex_block_addr,
-            vex_stmt_idx=addr_obj.vex_stmt_idx,
+            **addr_obj.tags,
         )
         dst = VirtualVariable(
             true_stmt_dst.idx,
@@ -242,6 +237,14 @@ class ITERegionConverter(OptimizationPass):
         #
 
         region_nodes = subgraph_between_nodes(self._graph, region_head, [region_tail])
+
+        # we must obtain the predecessors of the region tail instead of using true_block and false_block because
+        # true_block and false_block may have other successors before reaching the region tail!
+        region_tail_preds = [pred for pred in self._graph.predecessors(region_tail) if pred in region_nodes]
+        if len(region_tail_preds) != 2:
+            return False
+        region_tail_pred_srcs = {(pred.addr, pred.idx) for pred in region_tail_preds}
+
         for node in region_nodes:
             if node is region_head or node is region_tail:
                 continue
@@ -257,12 +260,32 @@ class ITERegionConverter(OptimizationPass):
             if not is_phi_assignment(stmt):
                 stmts.append(stmt)
                 continue
-            new_src_and_vvars = []
+
+            # is this the statement that we are looking for?
+            found_true_src_vvar, found_false_src_vvar = False, False
             for src, vvar in stmt.src.src_and_vvars:
-                if src not in {(true_block.addr, true_block.idx), (false_block.addr, false_block.idx)}:
+                if vvar is not None:
+                    if vvar.varid == true_stmt_dst.varid:
+                        found_true_src_vvar = True
+                    elif vvar.varid == false_stmt_dst.varid:
+                        found_false_src_vvar = True
+            # we should only update the vvars of this phi statement if we found both true and false source vvars
+            update_vars = found_true_src_vvar and found_false_src_vvar
+
+            new_src_and_vvars = []
+            original_vvars = []
+            for src, vvar in stmt.src.src_and_vvars:
+                if src not in region_tail_pred_srcs:
                     new_src_and_vvars.append((src, vvar))
+                else:
+                    original_vvars.append(vvar)
             new_vvar = new_assignment.dst.copy()
-            new_src_and_vvars.append(((region_head.addr, region_head.idx), new_vvar))
+            if update_vars:
+                new_src_and_vvars.append(((region_head.addr, region_head.idx), new_vvar))
+            else:
+                new_src_and_vvars.append(
+                    ((region_head.addr, region_head.idx), original_vvars[0] if original_vvars else None)
+                )
 
             new_phi = Phi(
                 stmt.src.idx,

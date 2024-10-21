@@ -1,6 +1,5 @@
 from __future__ import annotations
 from typing import Any
-from itertools import count
 import copy
 import logging
 
@@ -12,11 +11,11 @@ from ailment.statement import Jump, ConditionalJump, Assignment, Return, Label
 from ailment.expression import Const, Phi, VirtualVariable
 
 from angr.utils.ail import is_phi_assignment
-from ..condition_processor import ConditionProcessor, EmptyBlockNotice
-from ..graph_region import GraphRegion
-from ..utils import remove_labels, to_ail_supergraph, calls_in_graph
-from ..structuring.structurer_nodes import MultiNode, ConditionNode
-from ..region_identifier import RegionIdentifier
+from angr.analyses.decompiler.condition_processor import ConditionProcessor, EmptyBlockNotice
+from angr.analyses.decompiler.graph_region import GraphRegion
+from angr.analyses.decompiler.utils import remove_labels, to_ail_supergraph, calls_in_graph
+from angr.analyses.decompiler.structuring.structurer_nodes import MultiNode, ConditionNode
+from angr.analyses.decompiler.region_identifier import RegionIdentifier
 
 _l = logging.getLogger(name=__name__)
 
@@ -78,22 +77,26 @@ class ReturnDuplicatorBase:
     def __init__(
         self,
         func,
-        node_idx_start: int = 0,
         max_calls_in_regions: int = 2,
         minimize_copies_for_regions: bool = True,
         ri: RegionIdentifier | None = None,
         vvar_id_start: int | None = None,
-        **kwargs,
+        scratch: dict[str, Any] | None = None,
     ):
-        self.node_idx = count(start=node_idx_start)
         self._max_calls_in_region = max_calls_in_regions
         self._minimize_copies_for_regions = minimize_copies_for_regions
         self._supergraph = None
 
         # this should also be set by the optimization passes initer
+        self.scratch = scratch if scratch is not None else {}
         self._func = func
         self._ri: RegionIdentifier | None = ri
         self.vvar_id_start = vvar_id_start
+
+    def next_node_idx(self) -> int:
+        node_idx = self.scratch.get("returndup_node_idx", 0) + 1
+        self.scratch["returndup_node_idx"] = node_idx
+        return node_idx
 
     #
     # must implement these methods
@@ -208,7 +211,7 @@ class ReturnDuplicatorBase:
                 else:
                     node_copy = copy.deepcopy(node)
                 node_copy = self._use_fresh_virtual_variables(node_copy, vvar_mapping)
-                node_copy.idx = next(self.node_idx)
+                node_copy.idx = self.next_node_idx()
                 self._fix_copied_node_labels(node_copy)
                 copies[node] = node_copy
 
