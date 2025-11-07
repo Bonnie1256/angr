@@ -267,8 +267,10 @@ class SimOS:
             state.regs.ip = addr
         cc.setup_callsite(state, ret_addr, args, prototype, stack_base, alloc_base, grow_like_stack)
 
-        if state.arch.name == "PPC64" and toc is not None:
-            state.regs.r2 = toc
+        if state.arch.name == "PPC64":
+            if toc is not None:
+                state.regs.r2 = toc
+            state.regs.r12 = addr
         elif state.arch.name in ("MIPS32", "MIPS64"):
             state.regs.t9 = addr
 
