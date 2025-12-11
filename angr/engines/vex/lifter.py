@@ -236,7 +236,12 @@ class VEXLifter(SimEngine):
                 buff, size = insn_bytes, len(insn_bytes)
                 # offset stays unchanged
             else:
-                buff, size, offset = self._load_bytes(addr, size, state, clemory)
+                # buff, size, offset = self._load_bytes(addr, size, state, clemory)
+                if thumb:
+                    buff, size, offset = self._load_bytes(addr - 20, size + 20, state, clemory)
+                    offset += 20
+                else:
+                    buff, size, offset = self._load_bytes(addr, size, state, clemory)
 
         if isinstance(buff, claripy.ast.BV):  # pylint:disable=isinstance-second-argument-not-valid-type
             if len(buff) == 0:
